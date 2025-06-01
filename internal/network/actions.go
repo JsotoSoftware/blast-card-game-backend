@@ -5,6 +5,14 @@ const (
 	// Full state synchronization
 	ActionFullState = "full_state"
 
+	// Room related actions
+	ActionRoomCreated = "room_created"
+	ActionRoomList    = "room_list"
+	ActionRoomJoined  = "room_joined"
+
+	// Match related actions
+	ActionMatchStarted = "match_started"
+
 	// Player related actions
 	ActionPlayerJoined     = "player_joined"
 	ActionPlayerLeft       = "player_left"

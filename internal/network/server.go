@@ -19,8 +19,17 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// activeMatches mantiene todas las partidas activas en memoria
-var activeMatches = make(map[string]*game.Match)
+// Global room manager
+var roomManager = game.NewRoomManager()
+
+// Default room ID
+const DefaultRoomID = "lobby"
+
+// Initialize default room
+func init() {
+	// Create the default lobby room
+	roomManager.CreateRoom(DefaultRoomID, 1000, "system", false, "")
+}
 
 // ActionMessage represents a game action to be broadcasted
 type ActionMessage struct {
@@ -28,58 +37,77 @@ type ActionMessage struct {
 	Payload interface{} `json:"payload"`
 }
 
-// HandleConnections maneja cada nueva conexión WebSocket
-func HandleConnections(w http.ResponseWriter, r *http.Request) {
-	// 1) Actualizar a WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
+// sendFullRoomState sends the complete room state to a player
+func sendFullRoomState(room *game.Room, player *game.Player) {
+	action := ActionMessage{
+		Type:    ActionFullState,
+		Payload: room.GetPublicInfo(),
+	}
+
+	actionData, err := json.Marshal(action)
 	if err != nil {
-		log.Println("Error al actualizar a WebSocket:", err)
+		log.Println("Error serializing room state:", err)
 		return
 	}
 
-	// 2) Determinar a qué partida (match) se va a unir
-	matchID := r.URL.Query().Get("match_id")
-	if matchID == "" {
-		matchID = "default-match"
-	}
-	if _, exists := activeMatches[matchID]; !exists {
-		activeMatches[matchID] = game.NewMatch(matchID)
-	}
-	match := activeMatches[matchID]
+	player.Conn.WriteMessage(websocket.TextMessage, actionData)
+}
 
-	// 3) Intentar reconexión si envían player_id en la URL
+// HandleConnections handles each new WebSocket connection
+func HandleConnections(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Error upgrading to WebSocket:", err)
+		return
+	}
+
+	// Get room ID from query parameters
+	roomID := r.URL.Query().Get("room_id")
+	if roomID == "" {
+		roomID = DefaultRoomID
+	}
+
+	// Get or create room
+	room := roomManager.GetRoom(roomID)
+	if room == nil {
+		// Create a new room if it doesn't exist (only for non-default rooms)
+		if roomID != DefaultRoomID {
+			room = roomManager.CreateRoom(roomID, 10, "system", false, "")
+		} else {
+			// If default room doesn't exist (shouldn't happen), create it
+			room = roomManager.CreateRoom(DefaultRoomID, 1000, "system", false, "")
+		}
+	}
+
+	// Try to reconnect if player_id is provided
 	playerID := r.URL.Query().Get("player_id")
 	var player *game.Player
 
 	if playerID != "" {
-		// Si existe, tratamos de reconectar
-		if match.ReconnectPlayer(playerID, conn) {
-			// Encontrar el puntero al jugador recien reconectado
-			for _, p := range match.Players {
+		// Try to reconnect to the room
+		if room.Match != nil && room.Match.ReconnectPlayer(playerID, conn) {
+			for _, p := range room.Match.Players {
 				if p.ID == playerID {
 					player = p
 					break
 				}
 			}
 			if player != nil {
-				// Send identification first
 				sendPlayerIdentification(player, true)
-
-				// Then send full state
-				sendFullMatchState(match, player)
-
-				broadcastAction(match, ActionPlayerJoined, map[string]interface{}{
+				if room.Match != nil {
+					sendFullMatchState(room.Match, player)
+				}
+				broadcastToRoom(room, ActionPlayerJoined, map[string]interface{}{
 					"player_id":    player.ID,
 					"username":     player.Username,
 					"is_reconnect": true,
 				})
-
-				log.Printf("Jugador %s reconectado al match %s", player.Username, matchID)
+				log.Printf("Player %s reconnected to room %s", player.Username, roomID)
 			}
 		}
 	}
 
-	// 4) Si no había player (o no se reconectó), creamos uno nuevo
+	// If no player (or failed to reconnect), create a new one
 	if player == nil {
 		playerID = uuid.New().String()
 		player = &game.Player{
@@ -89,71 +117,69 @@ func HandleConnections(w http.ResponseWriter, r *http.Request) {
 			Send:           make(chan []byte),
 			IsDisconnected: false,
 		}
-		match.AddPlayer(player)
 
-		// Send identification first
+		// Add player to room
+		if !room.AddPlayer(player) {
+			sendError(player, "Room is full")
+			conn.Close()
+			return
+		}
+
 		sendPlayerIdentification(player, false)
-
-		// Then send full state
-		sendFullMatchState(match, player)
-
-		broadcastAction(match, ActionPlayerJoined, map[string]interface{}{
+		sendFullRoomState(room, player)
+		broadcastToRoom(room, ActionPlayerJoined, map[string]interface{}{
 			"player_id":    player.ID,
 			"username":     player.Username,
 			"is_reconnect": false,
 		})
-
-		log.Printf("Nuevo jugador %s conectado al match %s", player.Username, matchID)
+		log.Printf("New player %s connected to room %s", player.Username, roomID)
 	}
 
-	// 5) Defer para limpiar al jugador cuando se desconecte
+	// Cleanup when player disconnects
 	defer func() {
 		conn.Close()
+		if room.Match != nil {
+			room.Match.RemovePlayer(player.ID)
+			broadcastToRoom(room, ActionPlayerLeft, map[string]interface{}{
+				"player_id":       player.ID,
+				"can_reconnect":   true,
+				"timeout_seconds": room.Match.ReconnectTimeout,
+				"reason":          "disconnected",
+			})
+		}
+		room.RemovePlayer(player.ID)
+		log.Printf("Player %s disconnected from room %s", player.Username, roomID)
 
-		// Marcar como desconectado (no se elimina instantáneamente)
-		match.RemovePlayer(player.ID)
-
-		// Notificar que se desconectó (para que otros sepan que puede reconectar)
-		broadcastAction(match, ActionPlayerLeft, map[string]interface{}{
-			"player_id":       player.ID,
-			"can_reconnect":   true,
-			"timeout_seconds": match.ReconnectTimeout,
-			"reason":          "disconnected",
-		})
-		log.Printf("Jugador %s desconectado del match %s (esperando reconexión %d s)",
-			player.Username, matchID, match.ReconnectTimeout)
-
-		// Si no quedan jugadores activos, borramos la partida completa
-		if match.GetActivePlayers() == 0 {
-			delete(activeMatches, matchID)
-			log.Printf("Match %s eliminado (sin jugadores activos)", matchID)
+		// Remove room if empty
+		if room.GetPlayerCount() == 0 && room.Name != "lobby" {
+			roomManager.RemoveRoom(roomID)
+			log.Printf("Room %s removed (empty)", roomID)
 		}
 	}()
 
-	// 6) Bucle de lectura de mensajes del cliente
+	// Message reading loop
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseNoStatusReceived) {
-				log.Printf("Cierre inesperado de %s: %v", player.Username, err)
+				log.Printf("Unexpected close from %s: %v", player.Username, err)
 			} else {
-				log.Printf("Conexión cerrada por el jugador %s: %v", player.Username, err)
+				log.Printf("Connection closed by player %s: %v", player.Username, err)
 			}
 			break
 		}
 
-		log.Printf("Mensaje recibido de %s: %s", player.Username, string(msg))
-		processMessage(match, player, msg)
+		log.Printf("Message received from %s: %s", player.Username, string(msg))
+		processMessage(room, player, msg)
 	}
 }
 
-// processMessage procesa cada mensaje JSON recibido de un jugador
-func processMessage(match *game.Match, player *game.Player, msg []byte) {
-	// Deserializar a un mapa genérico de string→string
-	var data map[string]string
+// processMessage processes each JSON message received from a player
+func processMessage(room *game.Room, player *game.Player, msg []byte) {
+	var data map[string]interface{}
 	err := json.Unmarshal(msg, &data)
 	if err != nil {
-		log.Println("Error al desenlazar mensaje:", err)
+		log.Println("Error unmarshaling message:", err)
 		return
 	}
 
@@ -164,28 +190,93 @@ func processMessage(match *game.Match, player *game.Player, msg []byte) {
 
 	switch action {
 	case ActionCardPlayed:
-		card := data["card"]
-		log.Printf("%s jugó la carta %s en match %s", player.Username, card, match.ID)
-
-		// Notificar a todos los jugadores del evento "card_played"
-		broadcastAction(match, ActionCardPlayed, map[string]interface{}{
-			"player_id": player.ID,
-			"card":      card,
-		})
+		if room.Match == nil {
+			sendError(player, "No active match")
+			return
+		}
+		if card, ok := data["card"].(string); ok {
+			log.Printf("%s played card %s in match %s", player.Username, card, room.Match.ID)
+			broadcastAction(room.Match, ActionCardPlayed, map[string]interface{}{
+				"player_id": player.ID,
+				"card":      card,
+			})
+		}
 
 	case ActionEndTurn:
-		match.NextTurn()
-		log.Printf("Turno pasado a %s", match.GetCurrentPlayer().Username)
-
-		// Notificar a todos que cambió turno
-		broadcastAction(match, ActionTurnChanged, map[string]interface{}{
-			"player_id": match.GetCurrentPlayer().ID,
+		if room.Match == nil {
+			sendError(player, "No active match")
+			return
+		}
+		room.Match.NextTurn()
+		log.Printf("Turn passed to %s", room.Match.GetCurrentPlayer().Username)
+		broadcastAction(room.Match, ActionTurnChanged, map[string]interface{}{
+			"player_id": room.Match.GetCurrentPlayer().ID,
 		})
 
-	// Agrega más acciones aquí según necesites
+	case ActionRoomList:
+		// Send list of available rooms
+		rooms := roomManager.ListRooms()
+		action := ActionMessage{
+			Type:    ActionRoomList,
+			Payload: rooms,
+		}
+		actionData, err := json.Marshal(action)
+		if err != nil {
+			log.Println("Error serializing room list:", err)
+			return
+		}
+		player.Conn.WriteMessage(websocket.TextMessage, actionData)
+
+	case ActionRoomCreated:
+		// Create a new room
+		if name, ok := data["name"].(string); ok {
+			isPrivate := false
+			password := ""
+			if priv, ok := data["is_private"].(bool); ok {
+				isPrivate = priv
+			}
+			if pwd, ok := data["password"].(string); ok && isPrivate {
+				password = pwd
+			}
+
+			room := roomManager.CreateRoom(name, 10, player.Username, isPrivate, password)
+			action := ActionMessage{
+				Type: ActionRoomCreated,
+				Payload: map[string]interface{}{
+					"room": room.GetPublicInfo(),
+				},
+			}
+			actionData, err := json.Marshal(action)
+			if err != nil {
+				log.Println("Error serializing room created:", err)
+				return
+			}
+			player.Conn.WriteMessage(websocket.TextMessage, actionData)
+		}
+
+	case "start_match":
+		// Only room creator can start the match
+		if room.CreatedBy != player.Username {
+			sendError(player, "Only room creator can start the match")
+			return
+		}
+
+		// Start the match
+		if room.StartMatch() {
+			// Send full match state to all players
+			for _, p := range room.Players {
+				sendFullMatchState(room.Match, p)
+			}
+			// Broadcast match started
+			broadcastToRoom(room, "match_started", map[string]interface{}{
+				"match_id": room.Match.ID,
+			})
+		} else {
+			sendError(player, "Cannot start match: not enough players")
+		}
+
 	default:
-		// Si viene una acción desconocida, podemos ignorarla o devolver un error
-		log.Printf("Acción desconocida recibida: %s", action)
+		log.Printf("Unknown action received: %s", action)
 	}
 }
 
@@ -224,10 +315,38 @@ func broadcastAction(match *game.Match, actionType string, payload interface{}) 
 		return
 	}
 
+	// If no match, don't broadcast
+	if match == nil {
+		return
+	}
+
 	// Enviar a cada jugador activo
 	for _, p := range match.Players {
 		if !p.IsDisconnected {
 			p.Conn.WriteMessage(websocket.TextMessage, actionData)
+		}
+	}
+}
+
+// broadcastToRoom sends a message to all players in a room
+func broadcastToRoom(room *game.Room, actionType string, payload interface{}) {
+	action := ActionMessage{
+		Type:    actionType,
+		Payload: payload,
+	}
+
+	actionData, err := json.Marshal(action)
+	if err != nil {
+		log.Println("Error serializing room broadcast:", err)
+		return
+	}
+
+	room.Mu.RLock()
+	defer room.Mu.RUnlock()
+
+	for _, player := range room.Players {
+		if !player.IsDisconnected {
+			player.Conn.WriteMessage(websocket.TextMessage, actionData)
 		}
 	}
 }
@@ -268,16 +387,26 @@ func sendPlayerIdentification(player *game.Player, isReconnect bool) {
 	player.Conn.WriteMessage(websocket.TextMessage, actionData)
 }
 
-// StartCleanupRoutine inicia la rutina que cada 10 segundos limpian jugadores desconectados
+// StartCleanupRoutine starts the routine that cleans up disconnected players
 func StartCleanupRoutine() {
+	// Start room cleanup routine
+	roomManager.StartCleanupRoutine()
+
+	// Start player cleanup routine
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			log.Println("Ejecutando limpieza de jugadores desconectados...")
-			for _, match := range activeMatches {
-				match.CleanupDisconnectedPlayers()
+			log.Println("Running cleanup of disconnected players...")
+			// Get all rooms and clean up their matches
+			rooms := roomManager.ListRooms()
+			for _, roomInfo := range rooms {
+				if roomID, ok := roomInfo["id"].(string); ok {
+					if room := roomManager.GetRoom(roomID); room != nil && room.Match != nil {
+						room.Match.CleanupDisconnectedPlayers()
+					}
+				}
 			}
 		}
 	}()
