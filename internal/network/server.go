@@ -55,6 +55,7 @@ func sendFullRoomState(room *game.Room, player *game.Player) {
 
 // HandleConnections handles each new WebSocket connection
 func HandleConnections(w http.ResponseWriter, r *http.Request) {
+	log.Println("New connection attempt")
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Error upgrading to WebSocket:", err)
@@ -66,6 +67,8 @@ func HandleConnections(w http.ResponseWriter, r *http.Request) {
 	if roomID == "" {
 		roomID = DefaultRoomID
 	}
+
+	log.Printf("Connection assigned to room: %s", roomID)
 
 	// Get or create room
 	room := roomManager.GetRoom(roomID)
@@ -93,6 +96,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if player != nil {
+				log.Printf("Player %s reconnected to room %s", player.Username, roomID)
 				sendPlayerIdentification(player, true)
 				if room.Match != nil {
 					sendFullMatchState(room.Match, player)
@@ -102,7 +106,6 @@ func HandleConnections(w http.ResponseWriter, r *http.Request) {
 					"username":     player.Username,
 					"is_reconnect": true,
 				})
-				log.Printf("Player %s reconnected to room %s", player.Username, roomID)
 			}
 		}
 	}
@@ -125,6 +128,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		log.Printf("Player %s added to room %s", player.Username, roomID)
 		sendPlayerIdentification(player, false)
 		sendFullRoomState(room, player)
 		broadcastToRoom(room, ActionPlayerJoined, map[string]interface{}{
@@ -148,7 +152,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		room.RemovePlayer(player.ID)
-		log.Printf("Player %s disconnected from room %s", player.Username, roomID)
+		log.Printf("Player %s disconnected and removed from room %s", player.Username, roomID)
 
 		// Remove room if empty
 		if room.GetPlayerCount() == 0 && room.Name != "lobby" {
