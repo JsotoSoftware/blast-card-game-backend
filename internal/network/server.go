@@ -55,6 +55,7 @@ func sendFullRoomState(room *game.Room, player *game.Player) {
 
 // HandleConnections handles each new WebSocket connection
 func HandleConnections(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Incoming connection from %s, query: %s", r.RemoteAddr, r.URL.RawQuery)
 	log.Println("New connection attempt")
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -62,99 +63,43 @@ func HandleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get room ID from query parameters
-	roomID := r.URL.Query().Get("room_id")
-	if roomID == "" {
-		roomID = DefaultRoomID
-	}
-
-	log.Printf("Connection assigned to room: %s", roomID)
-
-	// Get or create room
+	// Always connect to lobby first
+	roomID := DefaultRoomID
 	room := roomManager.GetRoom(roomID)
 	if room == nil {
-		// Create a new room if it doesn't exist (only for non-default rooms)
-		if roomID != DefaultRoomID {
-			room = roomManager.CreateRoom(roomID, 10, "system", false, "")
-		} else {
-			// If default room doesn't exist (shouldn't happen), create it
-			room = roomManager.CreateRoom(DefaultRoomID, 1000, "system", false, "")
-		}
+		room = roomManager.CreateRoom(DefaultRoomID, 1000, "system", false, "")
 	}
 
-	// Try to reconnect if player_id is provided
-	playerID := r.URL.Query().Get("player_id")
-	var player *game.Player
-
-	if playerID != "" {
-		// Try to reconnect to the room
-		if room.Match != nil && room.Match.ReconnectPlayer(playerID, conn) {
-			for _, p := range room.Match.Players {
-				if p.ID == playerID {
-					player = p
-					break
-				}
-			}
-			if player != nil {
-				log.Printf("Player %s reconnected to room %s", player.Username, roomID)
-				sendPlayerIdentification(player, true)
-				if room.Match != nil {
-					sendFullMatchState(room.Match, player)
-				}
-				broadcastToRoom(room, ActionPlayerJoined, map[string]interface{}{
-					"player_id":    player.ID,
-					"username":     player.Username,
-					"is_reconnect": true,
-				})
-			}
-		}
+	playerID := uuid.New().String()
+	player := &game.Player{
+		ID:             playerID,
+		Username:       "Player-" + playerID[:5],
+		Conn:           conn,
+		Send:           make(chan []byte),
+		IsDisconnected: false,
 	}
 
-	// If no player (or failed to reconnect), create a new one
-	if player == nil {
-		playerID = uuid.New().String()
-		player = &game.Player{
-			ID:             playerID,
-			Username:       "Player-" + playerID[:5],
-			Conn:           conn,
-			Send:           make(chan []byte),
-			IsDisconnected: false,
-		}
-
-		// Add player to room
-		if !room.AddPlayer(player) {
-			sendError(player, "Room is full")
-			conn.Close()
-			return
-		}
-
-		log.Printf("Player %s added to room %s", player.Username, roomID)
-		sendPlayerIdentification(player, false)
-		sendFullRoomState(room, player)
-		broadcastToRoom(room, ActionPlayerJoined, map[string]interface{}{
-			"player_id":    player.ID,
-			"username":     player.Username,
-			"is_reconnect": false,
-		})
-		log.Printf("New player %s connected to room %s", player.Username, roomID)
+	log.Printf("Attempting to add player %s to lobby (current: %d, max: %d)", player.Username, room.GetPlayerCount(), room.MaxPlayers)
+	if !room.AddPlayer(player) {
+		log.Printf("Lobby is full (%d/%d). Rejecting player %s", room.GetPlayerCount(), room.MaxPlayers, player.Username)
+		sendError(player, "Lobby is full")
+		log.Printf("Sent 'Lobby is full' error to player %s", player.Username)
+		return
 	}
+	log.Printf("Player %s successfully added to lobby (now: %d/%d)", player.Username, room.GetPlayerCount(), room.MaxPlayers)
+	sendPlayerIdentification(player, false)
+	sendFullRoomState(room, player)
+	broadcastToRoom(room, ActionPlayerJoined, map[string]interface{}{
+		"player_id":    player.ID,
+		"username":     player.Username,
+		"is_reconnect": false,
+	})
+	log.Printf("New player %s connected to lobby", player.Username)
 
-	// Cleanup when player disconnects
 	defer func() {
 		conn.Close()
-		if room.Match != nil {
-			room.Match.RemovePlayer(player.ID)
-			broadcastToRoom(room, ActionPlayerLeft, map[string]interface{}{
-				"player_id":       player.ID,
-				"can_reconnect":   true,
-				"timeout_seconds": room.Match.ReconnectTimeout,
-				"reason":          "disconnected",
-			})
-		}
 		room.RemovePlayer(player.ID)
-		log.Printf("Player %s disconnected and removed from room %s", player.Username, roomID)
-
-		// Remove room if empty
+		log.Printf("Player %s disconnected and removed from lobby", player.Username)
 		if room.GetPlayerCount() == 0 && room.Name != "lobby" {
 			roomManager.RemoveRoom(roomID)
 			log.Printf("Room %s removed (empty)", roomID)
@@ -181,8 +126,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request) {
 // processMessage processes each JSON message received from a player
 func processMessage(room *game.Room, player *game.Player, msg []byte) {
 	var data map[string]interface{}
-	err := json.Unmarshal(msg, &data)
-	if err != nil {
+	if err := json.Unmarshal(msg, &data); err != nil {
 		log.Println("Error unmarshaling message:", err)
 		return
 	}
@@ -193,6 +137,31 @@ func processMessage(room *game.Room, player *game.Player, msg []byte) {
 	}
 
 	switch action {
+	case "join_room":
+		roomID, ok := data["room_id"].(string)
+		if !ok || roomID == "" {
+			sendError(player, "Missing or invalid room_id")
+			return
+		}
+		customRoom := roomManager.GetRoom(roomID)
+		if customRoom == nil {
+			customRoom = roomManager.CreateRoom(roomID, 10, player.Username, false, "")
+		}
+		if customRoom.GetPlayerCount() >= customRoom.MaxPlayers {
+			sendError(player, "Room is full")
+			log.Printf("Sent 'Room is full' error to player %s for room %s", player.Username, roomID)
+			return
+		}
+		// Remove from current room (lobby)
+		room.RemovePlayer(player.ID)
+		customRoom.AddPlayer(player)
+		log.Printf("Player %s moved to room %s", player.Username, roomID)
+		sendFullRoomState(customRoom, player)
+		broadcastToRoom(customRoom, ActionPlayerJoined, map[string]interface{}{
+			"player_id":    player.ID,
+			"username":     player.Username,
+			"is_reconnect": false,
+		})
 	case ActionCardPlayed:
 		if room.Match == nil {
 			sendError(player, "No active match")
