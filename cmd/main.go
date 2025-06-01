@@ -7,9 +7,19 @@ import (
 	"os"
 
 	"ek-server/internal/network"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Cargar variables de entorno (.env)
+	if err := godotenv.Load(); err != nil {
+		log.Println("Aviso: no se encontró archivo .env, se usará configuración por defecto")
+	}
+
+	// Start the cleanup routine for disconnected players
+	network.StartCleanupRoutine()
+
 	// Websocket route
 	http.HandleFunc("/ws", network.HandleConnections)
 
@@ -21,8 +31,7 @@ func main() {
 	}
 
 	fmt.Println("Websocket server started on port", port)
-	err := http.ListenAndServe(":"+port, nil)
-	if err != nil {
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal("ListenAndServe failed: ", err)
 	}
 }

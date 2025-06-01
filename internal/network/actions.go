@@ -6,8 +6,10 @@ const (
 	ActionFullState = "full_state"
 
 	// Player related actions
-	ActionPlayerJoined = "player_joined"
-	ActionPlayerLeft   = "player_left"
+	ActionPlayerJoined     = "player_joined"
+	ActionPlayerLeft       = "player_left"
+	ActionPlayerIdentified = "player_identified"
+	ActionEndTurn          = "end_turn"
 
 	// Game state actions
 	ActionCardPlayed   = "card_played"
