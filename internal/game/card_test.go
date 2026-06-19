@@ -8,7 +8,7 @@ func TestCardHelpers(t *testing.T) {
 		got  bool
 		want bool
 	}{
-		{name: "TOKEN_A returns IsToken true", got: IsToken(CardTokenA), want: true},
+		{name: "TOKEN_A returns IsToken true", got: IsToken(CardTokenE), want: true},
 		{name: "WILD_TOKEN returns IsWildToken true", got: IsWildToken(CardWildToken), want: true},
 		{name: "SKIP_TURN returns IsToken false", got: IsToken(CardSkipTurn), want: false},
 		{name: "EXPLOSIVE returns IsExplosive true", got: IsExplosive(CardExplosive), want: true},

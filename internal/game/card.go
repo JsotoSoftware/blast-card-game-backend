@@ -13,6 +13,7 @@ const (
 	CardRequestCard          CardCode = "REQUEST_CARD"
 	CardShuffleDeck          CardCode = "SHUFFLE_DECK"
 	CardPeekDeck             CardCode = "PEEK_DECK"
+	CardPeekDeck5            CardCode = "PEEK_DECK_5"
 	CardWildToken            CardCode = "WILD_TOKEN"
 	CardExplosiveHolder      CardCode = "EXPLOSIVE_HOLDER"
 	CardCollectiveRecycle    CardCode = "COLLECTIVE_RECYCLE"
@@ -58,6 +59,7 @@ func IsAction(code CardCode) bool {
 		CardRequestCard,
 		CardShuffleDeck,
 		CardPeekDeck,
+		CardPeekDeck5,
 		CardCollectiveRecycle,
 		CardRevealHeldCard,
 		CardDrawFromBottom,
@@ -104,6 +106,7 @@ func RequiresPrivatePrompt(code CardCode) bool {
 	switch code {
 	case CardRequestCard,
 		CardPeekDeck,
+		CardPeekDeck5,
 		CardCollectiveRecycle,
 		CardRevealHeldCard,
 		CardReorderTop3,
