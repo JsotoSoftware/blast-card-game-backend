@@ -15,12 +15,12 @@ func TestDeckCountsForPlayerCounts(t *testing.T) {
 		wantPeek5     int
 		wantReorder5  int
 	}{
-		{players: 2, wantTotal: 48, wantExplosive: 5, wantShield: 5, wantPeek5: 0, wantReorder5: 0},
-		{players: 3, wantTotal: 49, wantExplosive: 5, wantShield: 6, wantPeek5: 0, wantReorder5: 0},
-		{players: 4, wantTotal: 72, wantExplosive: 8, wantShield: 8, wantPeek5: 1, wantReorder5: 1},
-		{players: 7, wantTotal: 72, wantExplosive: 8, wantShield: 8, wantPeek5: 1, wantReorder5: 1},
-		{players: 8, wantTotal: 107, wantExplosive: 10, wantShield: 10, wantPeek5: 1, wantReorder5: 1},
-		{players: 10, wantTotal: 107, wantExplosive: 10, wantShield: 10, wantPeek5: 1, wantReorder5: 1},
+		{players: 2, wantTotal: 44, wantExplosive: 1, wantShield: 5, wantPeek5: 0, wantReorder5: 0},
+		{players: 3, wantTotal: 46, wantExplosive: 2, wantShield: 6, wantPeek5: 0, wantReorder5: 0},
+		{players: 4, wantTotal: 67, wantExplosive: 3, wantShield: 8, wantPeek5: 1, wantReorder5: 1},
+		{players: 7, wantTotal: 70, wantExplosive: 6, wantShield: 8, wantPeek5: 1, wantReorder5: 1},
+		{players: 8, wantTotal: 104, wantExplosive: 7, wantShield: 10, wantPeek5: 1, wantReorder5: 1},
+		{players: 10, wantTotal: 106, wantExplosive: 9, wantShield: 10, wantPeek5: 1, wantReorder5: 1},
 	}
 
 	for _, test := range tests {

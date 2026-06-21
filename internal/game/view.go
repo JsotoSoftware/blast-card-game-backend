@@ -45,11 +45,12 @@ type PublicCardView struct {
 }
 
 type PublicPendingActionView struct {
-	ID             string            `json:"id"`
-	SourcePlayerID string            `json:"sourcePlayerId"`
-	Type           PendingActionType `json:"type"`
-	TargetPlayerID string            `json:"targetPlayerId,omitempty"`
-	CancelCount    int               `json:"cancelCount"`
+	ID              string            `json:"id"`
+	SourcePlayerID  string            `json:"sourcePlayerId"`
+	Type            PendingActionType `json:"type"`
+	TargetPlayerID  string            `json:"targetPlayerId,omitempty"`
+	CancelCount     int               `json:"cancelCount"`
+	ExpiresAtUnixMs int64             `json:"expiresAtUnixMs,omitempty"`
 }
 
 type PublicMarkedCardView struct {

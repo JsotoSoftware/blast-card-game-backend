@@ -10,7 +10,7 @@ import (
 const (
 	MinPlayers             = 2
 	MaxPlayers             = 10
-	InitialRandomHandCards = 6
+	InitialRandomHandCards = 7
 	RequiredShieldCards    = 1
 	InitialHandSize        = InitialRandomHandCards + RequiredShieldCards
 )
@@ -60,7 +60,6 @@ var deckProfiles = []deckProfile{
 		maxPlayers:       3,
 		extraShieldCards: 3,
 		counts: map[CardCode]int{
-			CardExplosive:            5,
 			CardCancel:               4,
 			CardForceExtraTurns:      2,
 			CardTargetExtraTurns:     2,
@@ -86,7 +85,6 @@ var deckProfiles = []deckProfile{
 		maxPlayers:       7,
 		fixedShieldCount: 8,
 		counts: map[CardCode]int{
-			CardExplosive:            8,
 			CardCancel:               5,
 			CardForceExtraTurns:      3,
 			CardTargetExtraTurns:     3,
@@ -114,7 +112,6 @@ var deckProfiles = []deckProfile{
 		maxPlayers:       10,
 		fixedShieldCount: 10,
 		counts: map[CardCode]int{
-			CardExplosive:            10,
 			CardCancel:               9,
 			CardForceExtraTurns:      5,
 			CardTargetExtraTurns:     5,
@@ -160,6 +157,7 @@ func DeckCardCounts(playerCount int) (map[CardCode]int, error) {
 
 	counts := cloneCounts(profile.counts)
 	counts[CardShield] = profile.shieldCount(playerCount)
+	counts[CardExplosive] = playerCount - 1
 
 	return counts, nil
 }

@@ -42,3 +42,14 @@ type PlayCardCommand struct {
 type DrawCardCommand struct {
 	PlayerID string `json:"playerId"`
 }
+
+type PlaceExplosiveCommand struct {
+	PlayerID string `json:"playerId"`
+	Index    int    `json:"index"`
+}
+
+type PlayCancelCommand struct {
+	PlayerID        string `json:"playerId"`
+	CardID          string `json:"cardId,omitempty"`
+	PendingActionID string `json:"pendingActionId,omitempty"`
+}

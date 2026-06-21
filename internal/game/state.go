@@ -49,6 +49,7 @@ type PendingAction struct {
 	SourcePlayerID  string            `json:"sourcePlayerId"`
 	Type            PendingActionType `json:"type"`
 	CardIDs         []string          `json:"cardIds"`
+	Cards           []Card            `json:"-"`
 	TargetPlayerID  string            `json:"targetPlayerId,omitempty"`
 	CancelCount     int               `json:"cancelCount"`
 	ExpiresAtUnixMs int64             `json:"expiresAtUnixMs"`
