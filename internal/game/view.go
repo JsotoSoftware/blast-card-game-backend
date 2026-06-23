@@ -49,6 +49,8 @@ type PublicPendingActionView struct {
 	SourcePlayerID  string            `json:"sourcePlayerId"`
 	Type            PendingActionType `json:"type"`
 	TargetPlayerID  string            `json:"targetPlayerId,omitempty"`
+	ComboKind       ComboKind         `json:"comboKind,omitempty"`
+	RequestedCode   CardCode          `json:"requestedCode,omitempty"`
 	CancelCount     int               `json:"cancelCount"`
 	ExpiresAtUnixMs int64             `json:"expiresAtUnixMs,omitempty"`
 }

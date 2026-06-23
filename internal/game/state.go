@@ -36,12 +36,22 @@ type PendingActionType string
 
 const (
 	PendingPlayCard           PendingActionType = "PLAY_CARD"
+	PendingCardCombo          PendingActionType = "CARD_COMBO"
 	PendingTokenCombo         PendingActionType = "TOKEN_COMBO"
+	PendingDiscardRecovery    PendingActionType = "DISCARD_RECOVERY"
 	PendingRequestCardChoice  PendingActionType = "REQUEST_CARD_CHOICE"
 	PendingRecycleChoices     PendingActionType = "RECYCLE_CHOICES"
 	PendingMarkedCardChoice   PendingActionType = "MARKED_CARD_CHOICE"
 	PendingDeckReorder        PendingActionType = "DECK_REORDER"
 	PendingExplosivePlacement PendingActionType = "EXPLOSIVE_PLACEMENT"
+)
+
+type ComboKind string
+
+const (
+	ComboPair          ComboKind = "PAIR"
+	ComboTriple        ComboKind = "TRIPLE"
+	ComboFiveDifferent ComboKind = "FIVE_DIFFERENT"
 )
 
 type PendingAction struct {
@@ -51,6 +61,8 @@ type PendingAction struct {
 	CardIDs         []string          `json:"cardIds"`
 	Cards           []Card            `json:"-"`
 	TargetPlayerID  string            `json:"targetPlayerId,omitempty"`
+	ComboKind       ComboKind         `json:"comboKind,omitempty"`
+	RequestedCode   CardCode          `json:"requestedCode,omitempty"`
 	CancelCount     int               `json:"cancelCount"`
 	ExpiresAtUnixMs int64             `json:"expiresAtUnixMs"`
 }

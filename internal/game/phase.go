@@ -10,6 +10,7 @@ const (
 	PhaseResolvingAction           GamePhase = "RESOLVING_ACTION"
 	PhaseWaitingRequestCardChoice  GamePhase = "WAITING_REQUEST_CARD_CHOICE"
 	PhaseWaitingRecycleChoices     GamePhase = "WAITING_RECYCLE_CHOICES"
+	PhaseWaitingDiscardRecovery    GamePhase = "WAITING_DISCARD_RECOVERY"
 	PhaseWaitingMarkedCardChoice   GamePhase = "WAITING_MARKED_CARD_CHOICE"
 	PhaseWaitingDeckReorder        GamePhase = "WAITING_DECK_REORDER"
 	PhaseWaitingExplosivePlacement GamePhase = "WAITING_EXPLOSIVE_PLACEMENT"

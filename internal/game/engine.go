@@ -187,6 +187,63 @@ func (e *Engine) PlayCard(state *GameState, cmd PlayCardCommand) ([]Event, error
 	return events, nil
 }
 
+func (e *Engine) PlayCombo(state *GameState, cmd PlayComboCommand) ([]Event, error) {
+	if state.Phase != PhasePlayerTurn {
+		return nil, ErrInvalidPhase
+	}
+	if state.CurrentPlayerID != cmd.PlayerID {
+		return nil, ErrNotYourTurn
+	}
+	playerIndex, player, err := currentAlivePlayer(state, cmd.PlayerID)
+	if err != nil {
+		return nil, err
+	}
+
+	cards, err := cardsByIDsInHand(player.Hand, cmd.CardIDs)
+	if err != nil {
+		return nil, err
+	}
+	comboKind, err := validateCombo(player.Hand, cards, cmd.RequestedCode)
+	if err != nil {
+		return nil, err
+	}
+
+	if comboKind == ComboPair {
+		if err := validateTarget(state, cmd.PlayerID, cmd.TargetID, true); err != nil {
+			return nil, err
+		}
+	}
+	if comboKind == ComboTriple {
+		if cmd.RequestedCode == "" {
+			return nil, ErrInvalidCardPlay
+		}
+		if err := validateTarget(state, cmd.PlayerID, cmd.TargetID, false); err != nil {
+			return nil, err
+		}
+	}
+
+	state.Players[playerIndex].Hand = removeCardsByIDs(player.Hand, cmd.CardIDs)
+	state.DiscardPile = append(state.DiscardPile, cards...)
+	state.Phase = PhaseCancelWindow
+	state.PendingAction = &PendingAction{
+		ID:              e.nextPendingID(),
+		SourcePlayerID:  cmd.PlayerID,
+		Type:            PendingCardCombo,
+		CardIDs:         append([]string(nil), cmd.CardIDs...),
+		Cards:           cards,
+		TargetPlayerID:  cmd.TargetID,
+		ComboKind:       comboKind,
+		RequestedCode:   cmd.RequestedCode,
+		ExpiresAtUnixMs: time.Now().Add(cancelWindowDuration).UnixMilli(),
+	}
+
+	events := []Event{
+		e.nextEvent(state, EventCardPlayed, cmd.PlayerID, cmd.CardIDs, cmd.TargetID),
+		e.nextEvent(state, EventActionPending, cmd.PlayerID, cmd.CardIDs, cmd.TargetID),
+	}
+	return events, nil
+}
+
 func (e *Engine) PlayCancel(state *GameState, cmd PlayCancelCommand) ([]Event, error) {
 	if state.PendingAction == nil {
 		return nil, ErrNoPendingAction
@@ -263,10 +320,46 @@ func (e *Engine) ResolveCancelWindow(state *GameState) ([]Event, error) {
 		return []Event{e.nextEvent(state, EventActionCanceled, pending.SourcePlayerID, pending.CardIDs, pending.TargetPlayerID)}, nil
 	}
 
-	card := pending.Cards[0]
 	state.PendingAction = nil
 	state.Phase = PhasePlayerTurn
-	return e.resolvePlayedCard(state, card, pending.SourcePlayerID, pending.TargetPlayerID)
+	switch pending.Type {
+	case PendingPlayCard:
+		card := pending.Cards[0]
+		return e.resolvePlayedCard(state, card, pending.SourcePlayerID, pending.TargetPlayerID)
+	case PendingCardCombo:
+		return e.resolveCombo(state, pending)
+	default:
+		return nil, ErrActionNotCancelable
+	}
+}
+
+func (e *Engine) ChooseCardFromDiscard(state *GameState, cmd ChooseCardFromDiscardCommand) ([]Event, error) {
+	if state.Phase != PhaseWaitingDiscardRecovery {
+		return nil, ErrInvalidPhase
+	}
+	if state.PendingAction == nil || state.PendingAction.Type != PendingDiscardRecovery {
+		return nil, ErrNoPendingAction
+	}
+	if state.PendingAction.SourcePlayerID != cmd.PlayerID {
+		return nil, ErrNotYourTurn
+	}
+
+	cardIndex := findCardIndexByID(state.DiscardPile, cmd.CardID)
+	if cardIndex < 0 {
+		return nil, ErrCardNotInHand
+	}
+	playerIndex, _, err := currentAlivePlayer(state, cmd.PlayerID)
+	if err != nil {
+		return nil, err
+	}
+
+	card := state.DiscardPile[cardIndex]
+	state.DiscardPile = removeCardAt(state.DiscardPile, cardIndex)
+	state.Players[playerIndex].Hand = append(state.Players[playerIndex].Hand, card)
+	state.PendingAction = nil
+	state.Phase = PhasePlayerTurn
+
+	return []Event{e.nextEvent(state, EventActionResolved, cmd.PlayerID, []string{card.ID}, "")}, nil
 }
 
 func (e *Engine) resolvePlayedCard(state *GameState, card Card, sourcePlayerID string, targetPlayerID string) ([]Event, error) {
@@ -311,6 +404,80 @@ func (e *Engine) resolvePlayedCard(state *GameState, card Card, sourcePlayerID s
 	}
 
 	return events, nil
+}
+
+func (e *Engine) resolveCombo(state *GameState, pending *PendingAction) ([]Event, error) {
+	events := []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, pending.CardIDs, pending.TargetPlayerID)}
+
+	switch pending.ComboKind {
+	case ComboPair:
+		if err := e.transferRandomCard(state, pending.TargetPlayerID, pending.SourcePlayerID); err != nil {
+			return nil, err
+		}
+	case ComboTriple:
+		if pending.RequestedCode == "" {
+			return nil, ErrInvalidCardPlay
+		}
+		if err := transferFirstCardByCode(state, pending.TargetPlayerID, pending.SourcePlayerID, pending.RequestedCode); err != nil {
+			return nil, err
+		}
+	case ComboFiveDifferent:
+		state.Phase = PhaseWaitingDiscardRecovery
+		state.PendingAction = &PendingAction{
+			ID:             e.nextPendingID(),
+			SourcePlayerID: pending.SourcePlayerID,
+			Type:           PendingDiscardRecovery,
+			CardIDs:        pending.CardIDs,
+			Cards:          pending.Cards,
+			ComboKind:      pending.ComboKind,
+		}
+		events = append(events, e.nextEvent(state, EventPrivatePromptSent, pending.SourcePlayerID, cardIDsOf(state.DiscardPile), ""))
+	default:
+		return nil, ErrInvalidCardPlay
+	}
+
+	return events, nil
+}
+
+func (e *Engine) transferRandomCard(state *GameState, fromPlayerID string, toPlayerID string) error {
+	fromIndex, fromPlayer, err := currentAlivePlayer(state, fromPlayerID)
+	if err != nil {
+		return err
+	}
+	toIndex, _, err := currentAlivePlayer(state, toPlayerID)
+	if err != nil {
+		return err
+	}
+	if len(fromPlayer.Hand) == 0 {
+		return ErrInvalidTarget
+	}
+
+	cardIndex := e.deckFactory.rng.Intn(len(fromPlayer.Hand))
+	card := fromPlayer.Hand[cardIndex]
+	state.Players[fromIndex].Hand = removeCardAt(fromPlayer.Hand, cardIndex)
+	state.Players[toIndex].Hand = append(state.Players[toIndex].Hand, card)
+	return nil
+}
+
+func transferFirstCardByCode(state *GameState, fromPlayerID string, toPlayerID string, code CardCode) error {
+	fromIndex, fromPlayer, err := currentAlivePlayer(state, fromPlayerID)
+	if err != nil {
+		return err
+	}
+	toIndex, _, err := currentAlivePlayer(state, toPlayerID)
+	if err != nil {
+		return err
+	}
+
+	cardIndex := findCardIndexByCode(fromPlayer.Hand, code)
+	if cardIndex < 0 {
+		return nil
+	}
+
+	card := fromPlayer.Hand[cardIndex]
+	state.Players[fromIndex].Hand = removeCardAt(fromPlayer.Hand, cardIndex)
+	state.Players[toIndex].Hand = append(state.Players[toIndex].Hand, card)
+	return nil
 }
 
 func (e *Engine) completeCurrentTurnUnit(state *GameState) []Event {
@@ -393,7 +560,144 @@ func isSupportedBasicAction(code CardCode) bool {
 }
 
 func isCancelablePendingAction(pending *PendingAction) bool {
-	return pending != nil && pending.Type == PendingPlayCard && len(pending.Cards) == 1 && isSupportedBasicAction(pending.Cards[0].Code)
+	if pending == nil {
+		return false
+	}
+	switch pending.Type {
+	case PendingPlayCard:
+		return len(pending.Cards) == 1 && isSupportedBasicAction(pending.Cards[0].Code)
+	case PendingCardCombo:
+		return pending.ComboKind == ComboPair || pending.ComboKind == ComboTriple || pending.ComboKind == ComboFiveDifferent
+	default:
+		return false
+	}
+}
+
+func validateCombo(playerHand []Card, cards []Card, requestedCode CardCode) (ComboKind, error) {
+	switch len(cards) {
+	case 2:
+		if !validMatchingCombo(cards) {
+			return "", ErrInvalidCardPlay
+		}
+		return ComboPair, nil
+	case 3:
+		if !validMatchingCombo(cards) || requestedCode == "" {
+			return "", ErrInvalidCardPlay
+		}
+		return ComboTriple, nil
+	case 5:
+		if !validFiveDifferentCombo(playerHand, cards) {
+			return "", ErrInvalidCardPlay
+		}
+		return ComboFiveDifferent, nil
+	default:
+		return "", ErrInvalidCardPlay
+	}
+}
+
+func validMatchingCombo(cards []Card) bool {
+	if len(cards) != 2 && len(cards) != 3 {
+		return false
+	}
+
+	reference := CardCode("")
+	seenRealToken := false
+	usesTokenRules := false
+	for _, card := range cards {
+		if IsExplosive(card.Code) {
+			return false
+		}
+		if IsToken(card.Code) {
+			usesTokenRules = true
+			seenRealToken = true
+			if reference == "" {
+				reference = card.Code
+			} else if reference != card.Code {
+				return false
+			}
+			continue
+		}
+		if IsWildToken(card.Code) {
+			usesTokenRules = true
+			continue
+		}
+		if usesTokenRules {
+			return false
+		}
+		if reference == "" {
+			reference = card.Code
+		} else if reference != card.Code {
+			return false
+		}
+	}
+
+	if usesTokenRules {
+		return seenRealToken
+	}
+	return reference != ""
+}
+
+func validFiveDifferentCombo(playerHand []Card, cards []Card) bool {
+	if len(cards) != 5 {
+		return false
+	}
+
+	codes := map[CardCode]bool{}
+	includesExplosive := false
+	for _, card := range cards {
+		if card.Code == CardExplosiveHolder {
+			return false
+		}
+		if codes[card.Code] {
+			return false
+		}
+		codes[card.Code] = true
+		if IsExplosive(card.Code) {
+			includesExplosive = true
+		}
+	}
+
+	if includesExplosive && countCardsByCode(playerHand, CardExplosiveHolder) == 0 {
+		return false
+	}
+	return true
+}
+
+func cardsByIDsInHand(hand []Card, cardIDs []string) ([]Card, error) {
+	if len(cardIDs) == 0 {
+		return nil, ErrInvalidCardPlay
+	}
+
+	seen := map[string]bool{}
+	cards := make([]Card, 0, len(cardIDs))
+	for _, cardID := range cardIDs {
+		if cardID == "" || seen[cardID] {
+			return nil, ErrInvalidCardPlay
+		}
+		seen[cardID] = true
+
+		cardIndex := findCardIndexByID(hand, cardID)
+		if cardIndex < 0 {
+			return nil, ErrCardNotInHand
+		}
+		cards = append(cards, hand[cardIndex])
+	}
+	return cards, nil
+}
+
+func removeCardsByIDs(cards []Card, cardIDs []string) []Card {
+	remove := map[string]bool{}
+	for _, cardID := range cardIDs {
+		remove[cardID] = true
+	}
+
+	result := make([]Card, 0, len(cards)-len(remove))
+	for _, card := range cards {
+		if !remove[card.ID] {
+			result = append(result, card)
+		}
+	}
+	return result
 }
 
 func currentAlivePlayer(state *GameState, playerID string) (int, Player, error) {
@@ -498,6 +802,14 @@ func topCardIDs(cards []Card, count int) []string {
 	ids := make([]string, count)
 	for i := range count {
 		ids[i] = cards[i].ID
+	}
+	return ids
+}
+
+func cardIDsOf(cards []Card) []string {
+	ids := make([]string, len(cards))
+	for i, card := range cards {
+		ids[i] = card.ID
 	}
 	return ids
 }

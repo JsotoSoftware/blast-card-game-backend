@@ -20,6 +20,7 @@ const (
 	CommandChooseTarget            CommandType = "CHOOSE_TARGET"
 	CommandChooseCardForRequest    CommandType = "CHOOSE_CARD_FOR_REQUEST"
 	CommandChooseCardForRecycle    CommandType = "CHOOSE_CARD_FOR_RECYCLE"
+	CommandChooseCardFromDiscard   CommandType = "CHOOSE_CARD_FROM_DISCARD"
 	CommandChooseMarkedCard        CommandType = "CHOOSE_MARKED_CARD"
 	CommandSubmitReorderedTopCards CommandType = "SUBMIT_REORDERED_TOP_CARDS"
 	CommandPlaceExplosive          CommandType = "PLACE_EXPLOSIVE"
@@ -39,6 +40,13 @@ type PlayCardCommand struct {
 	TargetID string   `json:"targetId,omitempty"`
 }
 
+type PlayComboCommand struct {
+	PlayerID      string   `json:"playerId"`
+	CardIDs       []string `json:"cardIds"`
+	TargetID      string   `json:"targetId,omitempty"`
+	RequestedCode CardCode `json:"requestedCode,omitempty"`
+}
+
 type DrawCardCommand struct {
 	PlayerID string `json:"playerId"`
 }
@@ -52,4 +60,9 @@ type PlayCancelCommand struct {
 	PlayerID        string `json:"playerId"`
 	CardID          string `json:"cardId,omitempty"`
 	PendingActionID string `json:"pendingActionId,omitempty"`
+}
+
+type ChooseCardFromDiscardCommand struct {
+	PlayerID string `json:"playerId"`
+	CardID   string `json:"cardId"`
 }

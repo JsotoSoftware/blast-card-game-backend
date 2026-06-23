@@ -587,6 +587,326 @@ func TestPendingActionResolvesWhenTimerExpires(t *testing.T) {
 	}
 }
 
+func TestTwoOfKindNonTokenStealsRandomCardFromTarget(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(32)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardShuffleDeck)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2"}, TargetID: "p2"})
+	if err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	if state.Phase != PhaseCancelWindow || state.PendingAction == nil || state.PendingAction.Type != PendingCardCombo || state.PendingAction.ComboKind != ComboPair {
+		t.Fatalf("expected pending pair combo, got phase=%s pending=%#v", state.Phase, state.PendingAction)
+	}
+
+	_, err = engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if len(state.Players[1].Hand) != 0 {
+		t.Fatalf("target hand size got %d, want 0", len(state.Players[1].Hand))
+	}
+	if findCardIndexByID(state.Players[0].Hand, "target-card") < 0 {
+		t.Fatal("source should receive stolen target card")
+	}
+	if countCode(state.DiscardPile, CardSkipTurn) != 2 {
+		t.Fatal("combo cards should move to discard")
+	}
+}
+
+func TestTokenPairWithWildIsValid(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(33)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("token-1", CardTokenA), engineTestCard("wild-1", CardWildToken)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardShuffleDeck)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"token-1", "wild-1"}, TargetID: "p2"})
+	if err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+}
+
+func TestTokenCannotMixWithActionCard(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(34)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("token-1", CardTokenA), engineTestCard("skip-1", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardShuffleDeck)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"token-1", "skip-1"}, TargetID: "p2"})
+	if !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("PlayCombo error got %v, want ErrInvalidCardPlay", err)
+	}
+	if len(state.Players[0].Hand) != 2 || len(state.DiscardPile) != 0 {
+		t.Fatal("invalid combo should not mutate state")
+	}
+}
+
+func TestWildTokenCannotSubstituteForNonTokenPair(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(35)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("wild-1", CardWildToken), engineTestCard("skip-1", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardShuffleDeck)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"wild-1", "skip-1"}, TargetID: "p2"})
+	if !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("PlayCombo error got %v, want ErrInvalidCardPlay", err)
+	}
+}
+
+func TestThreeOfKindRequestsDeclaredCardCode(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(36)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn), engineTestCard("skip-3", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardShuffleDeck), engineTestCard("other-card", CardPeekDeck)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2", "skip-3"}, TargetID: "p2", RequestedCode: CardShuffleDeck})
+	if err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	_, err = engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if findCardIndexByID(state.Players[0].Hand, "target-card") < 0 {
+		t.Fatal("source should receive requested card")
+	}
+	if findCardIndexByID(state.Players[1].Hand, "target-card") >= 0 {
+		t.Fatal("target should lose requested card")
+	}
+}
+
+func TestThreeOfKindTransfersNothingWhenTargetLacksRequestedCode(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(37)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn), engineTestCard("skip-3", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("other-card", CardPeekDeck)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2", "skip-3"}, TargetID: "p2", RequestedCode: CardShuffleDeck})
+	if err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	_, err = engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if len(state.Players[1].Hand) != 1 || state.Players[1].Hand[0].ID != "other-card" {
+		t.Fatalf("target hand should be unchanged, got %#v", state.Players[1].Hand)
+	}
+}
+
+func TestPairOrTripleWithExplosiveIsInvalid(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(38)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("danger-1", CardExplosive), engineTestCard("danger-2", CardExplosive)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardShuffleDeck)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"danger-1", "danger-2"}, TargetID: "p2"})
+	if !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("PlayCombo error got %v, want ErrInvalidCardPlay", err)
+	}
+}
+
+func TestFiveDifferentComboRecoversDiscardCard(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(39)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{
+				engineTestCard("skip-1", CardSkipTurn),
+				engineTestCard("shuffle-1", CardShuffleDeck),
+				engineTestCard("peek-1", CardPeekDeck),
+				engineTestCard("request-1", CardRequestCard),
+				engineTestCard("shield-1", CardShield),
+			}),
+			engineTestPlayer("p2", nil),
+		},
+		nil,
+		"p1",
+	)
+	state.DiscardPile = []Card{engineTestCard("recover-me", CardTargetExtraTurns)}
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "shuffle-1", "peek-1", "request-1", "shield-1"}})
+	if err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	_, err = engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if state.Phase != PhaseWaitingDiscardRecovery || state.PendingAction == nil || state.PendingAction.Type != PendingDiscardRecovery {
+		t.Fatalf("expected discard recovery prompt, phase=%s pending=%#v", state.Phase, state.PendingAction)
+	}
+
+	_, err = engine.ChooseCardFromDiscard(state, ChooseCardFromDiscardCommand{PlayerID: "p1", CardID: "recover-me"})
+	if err != nil {
+		t.Fatalf("ChooseCardFromDiscard returned error: %v", err)
+	}
+	if findCardIndexByID(state.Players[0].Hand, "recover-me") < 0 {
+		t.Fatal("source should recover chosen discard card")
+	}
+	if state.Phase != PhasePlayerTurn || state.PendingAction != nil {
+		t.Fatalf("recovery should clear pending action and return to turn, phase=%s pending=%#v", state.Phase, state.PendingAction)
+	}
+}
+
+func TestFiveDifferentComboRejectsDuplicatesAndExplosiveHolder(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(40)))
+	state := engineTestState(
+		[]Player{engineTestPlayer("p1", []Card{
+			engineTestCard("skip-1", CardSkipTurn),
+			engineTestCard("skip-2", CardSkipTurn),
+			engineTestCard("peek-1", CardPeekDeck),
+			engineTestCard("request-1", CardRequestCard),
+			engineTestCard("shield-1", CardShield),
+			engineTestCard("holder-1", CardExplosiveHolder),
+		}), engineTestPlayer("p2", nil)},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2", "peek-1", "request-1", "shield-1"}})
+	if !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("duplicate-code five combo error got %v, want ErrInvalidCardPlay", err)
+	}
+	_, err = engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "holder-1", "peek-1", "request-1", "shield-1"}})
+	if !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("holder five combo error got %v, want ErrInvalidCardPlay", err)
+	}
+}
+
+func TestFiveDifferentComboExplosiveRequiresHolder(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(41)))
+	state := engineTestState(
+		[]Player{engineTestPlayer("p1", []Card{
+			engineTestCard("danger-1", CardExplosive),
+			engineTestCard("skip-1", CardSkipTurn),
+			engineTestCard("peek-1", CardPeekDeck),
+			engineTestCard("request-1", CardRequestCard),
+			engineTestCard("shield-1", CardShield),
+			engineTestCard("holder-1", CardExplosiveHolder),
+		}), engineTestPlayer("p2", nil)},
+		nil,
+		"p1",
+	)
+
+	stateWithoutHolder := *state
+	stateWithoutHolder.Players = append([]Player(nil), state.Players...)
+	stateWithoutHolder.Players[0].Hand = removeCardAt(state.Players[0].Hand, findCardIndexByID(state.Players[0].Hand, "holder-1"))
+	_, err := engine.PlayCombo(&stateWithoutHolder, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"danger-1", "skip-1", "peek-1", "request-1", "shield-1"}})
+	if !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("explosive without holder combo error got %v, want ErrInvalidCardPlay", err)
+	}
+
+	_, err = engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"danger-1", "skip-1", "peek-1", "request-1", "shield-1"}})
+	if err != nil {
+		t.Fatalf("explosive with holder PlayCombo returned error: %v", err)
+	}
+}
+
+func TestCanceledComboDoesNotResolve(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(42)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardShuffleDeck), engineTestCard("cancel-1", CardCancel)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2"}, TargetID: "p2"})
+	if err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	_, err = engine.PlayCancel(state, PlayCancelCommand{PlayerID: "p2", CardID: "cancel-1"})
+	if err != nil {
+		t.Fatalf("PlayCancel returned error: %v", err)
+	}
+	_, err = engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if findCardIndexByID(state.Players[1].Hand, "target-card") < 0 {
+		t.Fatal("canceled combo should not steal target card")
+	}
+	if findCardIndexByID(state.Players[0].Hand, "target-card") >= 0 {
+		t.Fatal("source should not receive card from canceled combo")
+	}
+}
+
+func TestTwoCancelsAllowComboToResolve(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(43)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn), engineTestCard("cancel-2", CardCancel)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardShuffleDeck), engineTestCard("cancel-1", CardCancel)}),
+		},
+		nil,
+		"p1",
+	)
+
+	_, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2"}, TargetID: "p2"})
+	if err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	_, err = engine.PlayCancel(state, PlayCancelCommand{PlayerID: "p2", CardID: "cancel-1"})
+	if err != nil {
+		t.Fatalf("first PlayCancel returned error: %v", err)
+	}
+	_, err = engine.PlayCancel(state, PlayCancelCommand{PlayerID: "p1", CardID: "cancel-2"})
+	if err != nil {
+		t.Fatalf("second PlayCancel returned error: %v", err)
+	}
+	_, err = engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if findCardIndexByID(state.Players[0].Hand, "target-card") < 0 {
+		t.Fatal("two cancels should allow combo to resolve")
+	}
+}
+
 func engineTestState(players []Player, drawPile []Card, currentPlayerID string) *GameState {
 	turnDebt := make(map[string]int, len(players))
 	for i := range players {
