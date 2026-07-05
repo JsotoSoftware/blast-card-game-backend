@@ -21,6 +21,7 @@ const (
 	MessageRoomCreated      = "ROOM_CREATED"
 	MessageRoomJoined       = "ROOM_JOINED"
 	MessageRoomView         = "ROOM_VIEW"
+	MessageGameView         = "GAME_VIEW"
 	MessageGameStarted      = "GAME_STARTED"
 	MessageHostTransferred  = "HOST_TRANSFERRED"
 	MessageKickVoteStarted  = "KICK_VOTE_STARTED"
@@ -219,6 +220,9 @@ func (h *WebSocketHandler) handleStartGame(ctx context.Context, client *connecte
 	if err := h.broadcastEnvelope(ctx, roomID, MessageGameStarted, GameStartedPayload{RequestID: envelope.RequestID, RoomID: roomID, Events: events}); err != nil {
 		return err
 	}
+	if err := h.broadcastGameViews(ctx, roomID); err != nil {
+		return err
+	}
 	return h.broadcastRoomView(ctx, roomID)
 }
 
@@ -333,6 +337,24 @@ func (h *WebSocketHandler) broadcastRoomView(ctx context.Context, roomID string)
 		return err
 	}
 	return h.broadcastEnvelope(ctx, roomID, MessageRoomView, view)
+}
+
+func (h *WebSocketHandler) broadcastGameViews(ctx context.Context, roomID string) error {
+	views, err := h.manager.GameViews(roomID)
+	if err != nil {
+		return err
+	}
+	clients := h.roomClients(roomID)
+	for _, client := range clients {
+		view, exists := views[client.playerID]
+		if !exists {
+			continue
+		}
+		if err := h.writeEnvelope(ctx, client, MessageGameView, view); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *WebSocketHandler) broadcastEnvelope(ctx context.Context, roomID string, messageType string, payload any) error {

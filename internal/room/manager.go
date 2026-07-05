@@ -167,6 +167,14 @@ func (m *Manager) RoomView(roomID string) (RoomView, error) {
 	return room.View(), nil
 }
 
+func (m *Manager) GameViews(roomID string) (map[string]game.PlayerGameView, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.GameViews()
+}
+
 func (m *Manager) uniqueRoomCodeLocked() (string, error) {
 	for range 100 {
 		code, err := randomCode(roomCodeLength)

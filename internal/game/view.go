@@ -60,3 +60,162 @@ type PublicMarkedCardView struct {
 	OwnerID string   `json:"ownerId"`
 	Code    CardCode `json:"code"`
 }
+
+func BuildViewForPlayer(state *GameState, playerID string) (PlayerGameView, error) {
+	playerIndex := findPlayerIndexByID(state, playerID)
+	if playerIndex < 0 {
+		return PlayerGameView{}, ErrPlayerNotFound
+	}
+
+	player := state.Players[playerIndex]
+	return PlayerGameView{
+		RoomID:            state.RoomID,
+		Phase:             state.Phase,
+		You:               buildPrivatePlayerView(player),
+		Players:           buildPublicPlayerViews(state.Players),
+		DrawPileCount:     len(state.DrawPile),
+		DiscardPile:       buildPublicCardViews(state.DiscardPile),
+		CurrentPlayerID:   state.CurrentPlayerID,
+		PendingAction:     buildPublicPendingActionView(state.PendingAction),
+		PublicMarkedCards: buildPublicMarkedCardViews(state.MarkedCards),
+		AvailableActions:  buildAvailableActions(state, player),
+	}, nil
+}
+
+func FilterEventsForPlayer(events []Event, playerID string) []Event {
+	filtered := make([]Event, 0, len(events))
+	for _, event := range events {
+		if event.Type == EventPrivatePromptSent && event.PlayerID != playerID {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
+}
+
+func buildPrivatePlayerView(player Player) PlayerPrivateView {
+	return PlayerPrivateView{
+		ID:      player.ID,
+		Name:    player.Name,
+		Hand:    buildPrivateCardViews(player),
+		Alive:   player.Alive,
+		Blinded: player.Blinded,
+	}
+}
+
+func buildPrivateCardViews(player Player) []PrivateCardView {
+	cards := make([]PrivateCardView, len(player.Hand))
+	for i, card := range player.Hand {
+		cards[i] = PrivateCardView{ID: card.ID}
+		if player.Blinded {
+			cards[i].IsHidden = true
+			continue
+		}
+		cards[i].Code = card.Code
+	}
+	return cards
+}
+
+func buildPublicPlayerViews(players []Player) []PlayerPublicView {
+	views := make([]PlayerPublicView, len(players))
+	for i, player := range players {
+		views[i] = PlayerPublicView{
+			ID:            player.ID,
+			Name:          player.Name,
+			HandCount:     len(player.Hand),
+			Alive:         player.Alive,
+			Connected:     player.Connected,
+			Ready:         player.Ready,
+			IsHost:        player.IsHost,
+			Blinded:       player.Blinded,
+			MarkedCardIDs: append([]string(nil), player.MarkedCardIDs...),
+		}
+	}
+	return views
+}
+
+func buildPublicCardViews(cards []Card) []PublicCardView {
+	views := make([]PublicCardView, len(cards))
+	for i, card := range cards {
+		views[i] = PublicCardView{ID: card.ID, Code: card.Code}
+	}
+	return views
+}
+
+func buildPublicPendingActionView(pending *PendingAction) *PublicPendingActionView {
+	if pending == nil {
+		return nil
+	}
+	return &PublicPendingActionView{
+		ID:              pending.ID,
+		SourcePlayerID:  pending.SourcePlayerID,
+		Type:            pending.Type,
+		TargetPlayerID:  pending.TargetPlayerID,
+		ComboKind:       pending.ComboKind,
+		RequestedCode:   pending.RequestedCode,
+		CancelCount:     pending.CancelCount,
+		ExpiresAtUnixMs: pending.ExpiresAtUnixMs,
+	}
+}
+
+func buildPublicMarkedCardViews(markedCards map[string]MarkedCard) []PublicMarkedCardView {
+	views := make([]PublicMarkedCardView, 0, len(markedCards))
+	for _, marked := range markedCards {
+		views = append(views, PublicMarkedCardView{
+			CardID:  marked.CardID,
+			OwnerID: marked.OwnerID,
+			Code:    marked.Revealed.Code,
+		})
+	}
+	return views
+}
+
+func buildAvailableActions(state *GameState, player Player) []CommandType {
+	if !player.Alive {
+		return nil
+	}
+
+	actions := make([]CommandType, 0)
+	switch state.Phase {
+	case PhasePlayerTurn:
+		if state.CurrentPlayerID == player.ID {
+			actions = append(actions, CommandDrawCard)
+			if hasPlayableAction(player.Hand) {
+				actions = append(actions, CommandPlayCard)
+			}
+			if hasPotentialComboCards(player.Hand) {
+				actions = append(actions, CommandPlayCombo)
+			}
+		}
+	case PhaseCancelWindow:
+		if findCardIndexByCode(player.Hand, CardCancel) >= 0 {
+			actions = append(actions, CommandPlayCancel)
+		}
+	case PhaseWaitingExplosivePlacement:
+		if state.PendingAction != nil && state.PendingAction.SourcePlayerID == player.ID {
+			actions = append(actions, CommandPlaceExplosive)
+		}
+	case PhaseWaitingRequestCardChoice:
+		if state.PendingAction != nil && state.PendingAction.TargetPlayerID == player.ID {
+			actions = append(actions, CommandChooseCardForRequest)
+		}
+	case PhaseWaitingDiscardRecovery:
+		if state.PendingAction != nil && state.PendingAction.SourcePlayerID == player.ID {
+			actions = append(actions, CommandChooseCardFromDiscard)
+		}
+	}
+	return actions
+}
+
+func hasPlayableAction(cards []Card) bool {
+	for _, card := range cards {
+		if IsAction(card.Code) && !IsCancel(card.Code) && isSupportedBasicAction(card.Code) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPotentialComboCards(cards []Card) bool {
+	return len(cards) >= 2
+}

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"exploding-game/server/internal/game"
 	"exploding-game/server/internal/room"
 
 	"github.com/coder/websocket"
@@ -162,6 +163,23 @@ func TestWebSocketReadyStartAndRoomViewBroadcast(t *testing.T) {
 
 	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "START_GAME", RequestID: "start", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken})
 	readUntilServerEnvelope(t, hostConn, MessageGameStarted)
+	hostGameViewEnvelope := readUntilServerEnvelope(t, hostConn, MessageGameView)
+	var hostGameView game.PlayerGameView
+	if err := json.Unmarshal(hostGameViewEnvelope.Payload, &hostGameView); err != nil {
+		t.Fatalf("Unmarshal host game view returned error: %v", err)
+	}
+	if hostGameView.You.ID != hostSession.PlayerID || len(hostGameView.You.Hand) == 0 || hostGameView.DrawPileCount == 0 {
+		t.Fatalf("unexpected host game view: %#v", hostGameView)
+	}
+
+	joinerGameViewEnvelope := readUntilServerEnvelope(t, joinerConn, MessageGameView)
+	var joinerGameView game.PlayerGameView
+	if err := json.Unmarshal(joinerGameViewEnvelope.Payload, &joinerGameView); err != nil {
+		t.Fatalf("Unmarshal joiner game view returned error: %v", err)
+	}
+	if joinerGameView.You.ID != joinerSession.PlayerID || len(joinerGameView.You.Hand) == 0 || joinerGameView.DrawPileCount == 0 {
+		t.Fatalf("unexpected joiner game view: %#v", joinerGameView)
+	}
 }
 
 func TestWebSocketTransferHost(t *testing.T) {

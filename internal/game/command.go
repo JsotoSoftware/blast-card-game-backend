@@ -15,6 +15,7 @@ const (
 	CommandStartKickVote           CommandType = "START_KICK_VOTE"
 	CommandCastKickVote            CommandType = "CAST_KICK_VOTE"
 	CommandPlayCard                CommandType = "PLAY_CARD"
+	CommandPlayCombo               CommandType = "PLAY_COMBO"
 	CommandDrawCard                CommandType = "DRAW_CARD"
 	CommandPlayCancel              CommandType = "PLAY_CANCEL"
 	CommandChooseTarget            CommandType = "CHOOSE_TARGET"

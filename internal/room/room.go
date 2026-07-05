@@ -109,6 +109,24 @@ func (r *Room) View() RoomView {
 	return r.viewLocked()
 }
 
+func (r *Room) GameViews() (map[string]game.PlayerGameView, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.state == nil {
+		return nil, nil
+	}
+	views := make(map[string]game.PlayerGameView, len(r.players))
+	for playerID := range r.players {
+		view, err := game.BuildViewForPlayer(r.state, playerID)
+		if err != nil {
+			return nil, err
+		}
+		views[playerID] = view
+	}
+	return views, nil
+}
+
 func (r *Room) Join(player *Player) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
