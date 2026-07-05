@@ -25,3 +25,46 @@ type CommandErrorPayload struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 }
+
+type CreateRoomPayload struct {
+	PlayerName string `json:"playerName,omitempty"`
+}
+
+type JoinRoomPayload struct {
+	RoomID     string `json:"roomId,omitempty"`
+	PlayerName string `json:"playerName,omitempty"`
+}
+
+type RoomSessionPayload struct {
+	RequestID   string `json:"requestId,omitempty"`
+	RoomID      string `json:"roomId"`
+	PlayerID    string `json:"playerId"`
+	PlayerToken string `json:"playerToken"`
+	IsHost      bool   `json:"isHost"`
+}
+
+type SetReadyPayload struct {
+	Ready bool `json:"ready"`
+}
+
+type TransferHostPayload struct {
+	TargetPlayerID string `json:"targetPlayerId"`
+}
+
+type StartKickVotePayload struct {
+	TargetPlayerID string `json:"targetPlayerId"`
+}
+
+type CastKickVotePayload struct {
+	Approve bool `json:"approve"`
+}
+
+type CommandAckPayload struct {
+	RequestID string `json:"requestId,omitempty"`
+}
+
+type GameStartedPayload struct {
+	RequestID string `json:"requestId,omitempty"`
+	RoomID    string `json:"roomId"`
+	Events    any    `json:"events"`
+}

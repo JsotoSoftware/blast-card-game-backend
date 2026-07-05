@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 	"time"
+
+	"exploding-game/server/internal/room"
+	"exploding-game/server/internal/transport"
 )
 
 const defaultPort = "8080"
@@ -24,8 +29,12 @@ func main() {
 	port := envOrDefault("PORT", defaultPort)
 	addr := ":" + port
 
+	roomManager := room.NewManager()
+	wsHandler := transport.NewWebSocketHandler(roomManager, logger)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler)
+	mux.Handle("GET /ws", wsHandler)
 
 	server := &http.Server{
 		Addr:              addr,
@@ -101,6 +110,18 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(statusCode int) {
 	r.statusCode = statusCode
 	r.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not implement http.Hijacker")
+	}
+	return hijacker.Hijack()
 }
 
 func envOrDefault(key string, fallback string) string {

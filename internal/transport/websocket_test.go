@@ -1,0 +1,366 @@
+package transport
+
+import (
+	"context"
+	"encoding/json"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"exploding-game/server/internal/room"
+
+	"github.com/coder/websocket"
+)
+
+type testServerEnvelope struct {
+	Version  int             `json:"version"`
+	Type     string          `json:"type"`
+	Sequence int64           `json:"sequence"`
+	Payload  json.RawMessage `json:"payload,omitempty"`
+}
+
+func TestWebSocketPingPong(t *testing.T) {
+	conn, closeServer := newTestWebSocket(t)
+	defer closeServer()
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+
+	writeClientEnvelope(t, conn, ClientEnvelope{Version: ProtocolVersion, Type: "PING", RequestID: "ping-1"})
+	response := readServerEnvelope(t, conn)
+
+	if response.Type != MessagePong {
+		t.Fatalf("message type got %s, want %s", response.Type, MessagePong)
+	}
+	if response.Sequence != 1 {
+		t.Fatalf("sequence got %d, want 1", response.Sequence)
+	}
+}
+
+func TestWebSocketCreateRoom(t *testing.T) {
+	conn, closeServer := newTestWebSocket(t)
+	defer closeServer()
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+
+	payload, err := json.Marshal(CreateRoomPayload{PlayerName: "Alice"})
+	if err != nil {
+		t.Fatalf("Marshal payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, conn, ClientEnvelope{Version: ProtocolVersion, Type: "CREATE_ROOM", RequestID: "create-1", Payload: payload})
+	response := readServerEnvelope(t, conn)
+
+	if response.Type != MessageRoomCreated {
+		t.Fatalf("message type got %s, want %s", response.Type, MessageRoomCreated)
+	}
+	var roomSession RoomSessionPayload
+	if err := json.Unmarshal(response.Payload, &roomSession); err != nil {
+		t.Fatalf("Unmarshal room session returned error: %v", err)
+	}
+	if roomSession.RequestID != "create-1" || roomSession.RoomID == "" || roomSession.PlayerID == "" || roomSession.PlayerToken == "" || !roomSession.IsHost {
+		t.Fatalf("unexpected room session payload: %#v", roomSession)
+	}
+}
+
+func TestWebSocketCreateAndJoinRoom(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	creator := dialTestWebSocket(t, server.URL)
+	defer creator.Close(websocket.StatusNormalClosure, "done")
+	joiner := dialTestWebSocket(t, server.URL)
+	defer joiner.Close(websocket.StatusNormalClosure, "done")
+
+	createPayload, err := json.Marshal(CreateRoomPayload{PlayerName: "Alice"})
+	if err != nil {
+		t.Fatalf("Marshal create payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, creator, ClientEnvelope{Version: ProtocolVersion, Type: "CREATE_ROOM", RequestID: "create-1", Payload: createPayload})
+	createResponse := readServerEnvelope(t, creator)
+	var created RoomSessionPayload
+	if err := json.Unmarshal(createResponse.Payload, &created); err != nil {
+		t.Fatalf("Unmarshal created payload returned error: %v", err)
+	}
+
+	joinPayload, err := json.Marshal(JoinRoomPayload{PlayerName: "Bob"})
+	if err != nil {
+		t.Fatalf("Marshal join payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, joiner, ClientEnvelope{Version: ProtocolVersion, Type: "JOIN_ROOM", RequestID: "join-1", RoomID: created.RoomID, Payload: joinPayload})
+	joinResponse := readServerEnvelope(t, joiner)
+	if joinResponse.Type != MessageRoomJoined {
+		t.Fatalf("message type got %s, want %s", joinResponse.Type, MessageRoomJoined)
+	}
+
+	roomValue, exists := manager.GetRoom(created.RoomID)
+	if !exists {
+		t.Fatal("created room should exist")
+	}
+	if roomValue.PlayerCount() != 2 {
+		t.Fatalf("room player count got %d, want 2", roomValue.PlayerCount())
+	}
+}
+
+func TestWebSocketReadyStartAndRoomViewBroadcast(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+
+	createPayload, err := json.Marshal(CreateRoomPayload{PlayerName: "Host"})
+	if err != nil {
+		t.Fatalf("Marshal create payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "CREATE_ROOM", RequestID: "create-1", Payload: createPayload})
+	createdEnvelope := readUntilServerEnvelope(t, hostConn, MessageRoomCreated)
+	var hostSession RoomSessionPayload
+	if err := json.Unmarshal(createdEnvelope.Payload, &hostSession); err != nil {
+		t.Fatalf("Unmarshal host session returned error: %v", err)
+	}
+	readUntilServerEnvelope(t, hostConn, MessageRoomView)
+
+	joinPayload, err := json.Marshal(JoinRoomPayload{PlayerName: "Joiner"})
+	if err != nil {
+		t.Fatalf("Marshal join payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "JOIN_ROOM", RequestID: "join-1", RoomID: hostSession.RoomID, Payload: joinPayload})
+	joinedEnvelope := readUntilServerEnvelope(t, joinerConn, MessageRoomJoined)
+	var joinerSession RoomSessionPayload
+	if err := json.Unmarshal(joinedEnvelope.Payload, &joinerSession); err != nil {
+		t.Fatalf("Unmarshal joiner session returned error: %v", err)
+	}
+	joinerRoomViewEnvelope := readUntilServerEnvelope(t, joinerConn, MessageRoomView)
+	var joinerRoomView room.RoomView
+	if err := json.Unmarshal(joinerRoomViewEnvelope.Payload, &joinerRoomView); err != nil {
+		t.Fatalf("Unmarshal room view returned error: %v", err)
+	}
+	if joinerRoomView.PlayerCount != 2 {
+		t.Fatalf("room view player count got %d, want 2", joinerRoomView.PlayerCount)
+	}
+
+	readyPayload, err := json.Marshal(SetReadyPayload{Ready: true})
+	if err != nil {
+		t.Fatalf("Marshal ready payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "SET_READY", RequestID: "ready-host", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: readyPayload})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "SET_READY", RequestID: "ready-joiner", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: readyPayload})
+	readUntilServerEnvelope(t, joinerConn, MessageCommandAck)
+
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "START_GAME", RequestID: "bad-start", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken})
+	errorEnvelope := readUntilServerEnvelope(t, joinerConn, MessageCommandError)
+	var errorPayload CommandErrorPayload
+	if err := json.Unmarshal(errorEnvelope.Payload, &errorPayload); err != nil {
+		t.Fatalf("Unmarshal error payload returned error: %v", err)
+	}
+	if errorPayload.Code != "NOT_HOST" {
+		t.Fatalf("error code got %s, want NOT_HOST", errorPayload.Code)
+	}
+
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "START_GAME", RequestID: "start", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken})
+	readUntilServerEnvelope(t, hostConn, MessageGameStarted)
+}
+
+func TestWebSocketTransferHost(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, joinerSession := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	transferPayload, err := json.Marshal(TransferHostPayload{TargetPlayerID: joinerSession.PlayerID})
+	if err != nil {
+		t.Fatalf("Marshal transfer payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "TRANSFER_HOST", RequestID: "transfer", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: transferPayload})
+	readUntilServerEnvelope(t, hostConn, MessageHostTransferred)
+	viewEnvelope := readUntilServerEnvelope(t, hostConn, MessageRoomView)
+	var view room.RoomView
+	if err := json.Unmarshal(viewEnvelope.Payload, &view); err != nil {
+		t.Fatalf("Unmarshal room view returned error: %v", err)
+	}
+	if view.HostPlayerID != joinerSession.PlayerID {
+		t.Fatalf("host got %s, want %s", view.HostPlayerID, joinerSession.PlayerID)
+	}
+}
+
+func TestWebSocketKickedPlayerReceivesNotification(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, joinerSession := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	kickPayload, err := json.Marshal(StartKickVotePayload{TargetPlayerID: hostSession.PlayerID})
+	if err != nil {
+		t.Fatalf("Marshal kick payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "START_KICK_VOTE", RequestID: "kick-host", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: kickPayload})
+
+	kickedEnvelope := readUntilServerEnvelope(t, hostConn, MessageKickedFromRoom)
+	var kickedPayload map[string]any
+	if err := json.Unmarshal(kickedEnvelope.Payload, &kickedPayload); err != nil {
+		t.Fatalf("Unmarshal kicked payload returned error: %v", err)
+	}
+	if kickedPayload["kickedPlayerId"] != hostSession.PlayerID || kickedPayload["roomId"] != hostSession.RoomID {
+		t.Fatalf("unexpected kicked payload: %#v", kickedPayload)
+	}
+
+	resolvedEnvelope := readUntilServerEnvelope(t, joinerConn, MessageKickVoteResolved)
+	var resolvedPayload map[string]any
+	if err := json.Unmarshal(resolvedEnvelope.Payload, &resolvedPayload); err != nil {
+		t.Fatalf("Unmarshal resolved payload returned error: %v", err)
+	}
+	if resolvedPayload["kickedPlayerId"] != hostSession.PlayerID {
+		t.Fatalf("unexpected resolved payload: %#v", resolvedPayload)
+	}
+}
+
+func TestWebSocketMalformedJSONReturnsErrorAndConnectionStaysOpen(t *testing.T) {
+	conn, closeServer := newTestWebSocket(t)
+	defer closeServer()
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, []byte("{")); err != nil {
+		t.Fatalf("Write malformed JSON returned error: %v", err)
+	}
+	response := readServerEnvelope(t, conn)
+	if response.Type != MessageCommandError {
+		t.Fatalf("message type got %s, want %s", response.Type, MessageCommandError)
+	}
+
+	writeClientEnvelope(t, conn, ClientEnvelope{Version: ProtocolVersion, Type: "PING", RequestID: "ping-after-error"})
+	response = readServerEnvelope(t, conn)
+	if response.Type != MessagePong {
+		t.Fatalf("connection should stay open; got message type %s", response.Type)
+	}
+}
+
+func TestWebSocketUnknownCommandReturnsError(t *testing.T) {
+	conn, closeServer := newTestWebSocket(t)
+	defer closeServer()
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+
+	writeClientEnvelope(t, conn, ClientEnvelope{Version: ProtocolVersion, Type: "NOPE", RequestID: "bad-1"})
+	response := readServerEnvelope(t, conn)
+	if response.Type != MessageCommandError {
+		t.Fatalf("message type got %s, want %s", response.Type, MessageCommandError)
+	}
+
+	var payload CommandErrorPayload
+	if err := json.Unmarshal(response.Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal error payload returned error: %v", err)
+	}
+	if payload.RequestID != "bad-1" || payload.Code != "UNKNOWN_COMMAND" {
+		t.Fatalf("unexpected error payload: %#v", payload)
+	}
+}
+
+func newTestWebSocket(t *testing.T) (*websocket.Conn, func()) {
+	t.Helper()
+	server := httptest.NewServer(NewWebSocketHandler(room.NewManager(), nil))
+	conn := dialTestWebSocket(t, server.URL)
+	return conn, server.Close
+}
+
+func dialTestWebSocket(t *testing.T, httpURL string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(httpURL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial returned error: %v", err)
+	}
+	return conn
+}
+
+func writeClientEnvelope(t *testing.T, conn *websocket.Conn, envelope ClientEnvelope) {
+	t.Helper()
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("Marshal envelope returned error: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+}
+
+func createAndJoinRoomOverWebSocket(t *testing.T, hostConn *websocket.Conn, joinerConn *websocket.Conn) (RoomSessionPayload, RoomSessionPayload) {
+	t.Helper()
+	createPayload, err := json.Marshal(CreateRoomPayload{PlayerName: "Host"})
+	if err != nil {
+		t.Fatalf("Marshal create payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "CREATE_ROOM", RequestID: "create-helper", Payload: createPayload})
+	createdEnvelope := readUntilServerEnvelope(t, hostConn, MessageRoomCreated)
+	var hostSession RoomSessionPayload
+	if err := json.Unmarshal(createdEnvelope.Payload, &hostSession); err != nil {
+		t.Fatalf("Unmarshal host session returned error: %v", err)
+	}
+	readUntilServerEnvelope(t, hostConn, MessageRoomView)
+
+	joinPayload, err := json.Marshal(JoinRoomPayload{PlayerName: "Joiner"})
+	if err != nil {
+		t.Fatalf("Marshal join payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "JOIN_ROOM", RequestID: "join-helper", RoomID: hostSession.RoomID, Payload: joinPayload})
+	joinedEnvelope := readUntilServerEnvelope(t, joinerConn, MessageRoomJoined)
+	var joinerSession RoomSessionPayload
+	if err := json.Unmarshal(joinedEnvelope.Payload, &joinerSession); err != nil {
+		t.Fatalf("Unmarshal joiner session returned error: %v", err)
+	}
+	readUntilServerEnvelope(t, joinerConn, MessageRoomView)
+	readUntilServerEnvelope(t, hostConn, MessageRoomView)
+	return hostSession, joinerSession
+}
+
+func readUntilServerEnvelope(t *testing.T, conn *websocket.Conn, messageType string) testServerEnvelope {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		response := readServerEnvelope(t, conn)
+		if response.Type == messageType {
+			return response
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", messageType)
+		}
+	}
+}
+
+func readServerEnvelope(t *testing.T, conn *websocket.Conn) testServerEnvelope {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	messageType, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read returned error: %v", err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("message type got %v, want text", messageType)
+	}
+	var envelope testServerEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("Unmarshal server envelope returned error: %v; data=%s", err, string(data))
+	}
+	if envelope.Version != ProtocolVersion {
+		t.Fatalf("version got %d, want %d", envelope.Version, ProtocolVersion)
+	}
+	return envelope
+}
