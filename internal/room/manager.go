@@ -124,15 +124,20 @@ func (m *Manager) TransferHost(roomID string, playerToken string, targetPlayerID
 	return room.TransferHost(playerToken, targetPlayerID)
 }
 
-func (m *Manager) StartGame(roomID string, playerToken ...string) ([]game.Event, error) {
+func (m *Manager) StartGame(roomID string, playerToken string) ([]game.Event, error) {
 	room, exists := m.GetRoom(roomID)
 	if !exists {
 		return nil, ErrRoomNotFound
 	}
-	if len(playerToken) == 0 {
-		return room.StartGameWithoutAuth()
+	return room.StartGame(playerToken)
+}
+
+func (m *Manager) StartGameWithoutAuth(roomID string) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
 	}
-	return room.StartGame(playerToken[0])
+	return room.StartGameWithoutAuth()
 }
 
 func (m *Manager) PlayerIDForToken(roomID string, playerToken string) (string, error) {

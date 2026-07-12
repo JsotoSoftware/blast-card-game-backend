@@ -92,7 +92,7 @@ func TestStartingGameInOneRoomDoesNotStartAnother(t *testing.T) {
 		t.Fatalf("JoinRoom B returned error: %v", err)
 	}
 
-	_, err = manager.StartGame(roomA.ID())
+	_, err = manager.StartGameWithoutAuth(roomA.ID())
 	if err != nil {
 		t.Fatalf("StartGame room A returned error: %v", err)
 	}

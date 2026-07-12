@@ -278,9 +278,7 @@ func (h *WebSocketHandler) handleStartKickVote(ctx context.Context, client *conn
 	if passed {
 		messageType = MessageKickVoteResolved
 		payloadOut["kickedPlayerId"] = kickedPlayerID
-		if err := h.notifyAndDetachKickedPlayer(ctx, roomID, kickedPlayerID); err != nil {
-			return err
-		}
+		h.notifyAndDetachKickedPlayer(ctx, roomID, kickedPlayerID)
 	}
 	if err := h.broadcastEnvelope(ctx, roomID, messageType, payloadOut); err != nil {
 		return err
@@ -306,9 +304,7 @@ func (h *WebSocketHandler) handleCastKickVote(ctx context.Context, client *conne
 	if passed {
 		messageType = MessageKickVoteResolved
 		payloadOut["kickedPlayerId"] = kickedPlayerID
-		if err := h.notifyAndDetachKickedPlayer(ctx, roomID, kickedPlayerID); err != nil {
-			return err
-		}
+		h.notifyAndDetachKickedPlayer(ctx, roomID, kickedPlayerID)
 	}
 	if err := h.broadcastEnvelope(ctx, roomID, messageType, payloadOut); err != nil {
 		return err
@@ -367,7 +363,7 @@ func (h *WebSocketHandler) broadcastEnvelope(ctx context.Context, roomID string,
 	return nil
 }
 
-func (h *WebSocketHandler) notifyAndDetachKickedPlayer(ctx context.Context, roomID string, kickedPlayerID string) error {
+func (h *WebSocketHandler) notifyAndDetachKickedPlayer(ctx context.Context, roomID string, kickedPlayerID string) {
 	clients := h.roomPlayerClients(roomID, kickedPlayerID)
 	for _, client := range clients {
 		if err := h.writeEnvelope(ctx, client, MessageKickedFromRoom, map[string]any{
@@ -379,7 +375,6 @@ func (h *WebSocketHandler) notifyAndDetachKickedPlayer(ctx context.Context, room
 		}
 	}
 	h.detachRoomPlayer(roomID, kickedPlayerID)
-	return nil
 }
 
 func (h *WebSocketHandler) writeError(ctx context.Context, client *connectedClient, requestID string, code string, message string) error {
@@ -464,13 +459,17 @@ func (h *WebSocketHandler) detachClientFromRoom(client *connectedClient) {
 func (h *WebSocketHandler) detachRoomPlayer(roomID string, playerID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for client := range h.rooms[roomID] {
+	clients := h.rooms[roomID]
+	for client := range clients {
 		if client.playerID == playerID {
-			delete(h.rooms[roomID], client)
+			delete(clients, client)
 			client.roomID = ""
 			client.playerID = ""
 			client.token = ""
 		}
+	}
+	if len(clients) == 0 {
+		delete(h.rooms, roomID)
 	}
 }
 

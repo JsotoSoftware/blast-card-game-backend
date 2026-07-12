@@ -26,7 +26,7 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	port := envOrDefault("PORT", defaultPort)
+	port := serverPort()
 	addr := ":" + port
 
 	roomManager := room.NewManager()
@@ -104,10 +104,15 @@ func requestLogger(next http.Handler, logger *slog.Logger) http.Handler {
 
 type statusRecorder struct {
 	http.ResponseWriter
-	statusCode int
+	statusCode  int
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(statusCode int) {
+	if r.wroteHeader {
+		return
+	}
+	r.wroteHeader = true
 	r.statusCode = statusCode
 	r.ResponseWriter.WriteHeader(statusCode)
 }
@@ -124,18 +129,14 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return hijacker.Hijack()
 }
 
-func envOrDefault(key string, fallback string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback
+func serverPort() string {
+	port := os.Getenv("PORT")
+	if port == "" {
+		return defaultPort
 	}
-
-	if key == "PORT" {
-		if _, err := strconv.Atoi(value); err != nil {
-			slog.Warn("invalid PORT value; using default", "value", value, "default", fallback)
-			return fallback
-		}
+	if _, err := strconv.Atoi(port); err != nil {
+		slog.Warn("invalid PORT value; using default", "value", port, "default", defaultPort)
+		return defaultPort
 	}
-
-	return value
+	return port
 }
