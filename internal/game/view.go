@@ -88,6 +88,10 @@ func FilterEventsForPlayer(events []Event, playerID string) []Event {
 		if event.Type == EventPrivatePromptSent && event.PlayerID != playerID {
 			continue
 		}
+		if event.Type == EventCardDrawn && event.PlayerID != playerID {
+			event.CardIDs = nil
+			event.Cards = nil
+		}
 		filtered = append(filtered, event)
 	}
 	return filtered

@@ -30,6 +30,10 @@ func main() {
 	addr := ":" + port
 
 	roomManager := room.NewManager()
+	if seed := gameTestSeed(); seed != nil {
+		roomManager = room.NewManagerWithSeed(*seed)
+		logger.Warn("using deterministic game seed for testing only", "seed", *seed)
+	}
 	wsHandler := transport.NewWebSocketHandler(roomManager, logger)
 
 	mux := http.NewServeMux()
@@ -127,6 +131,20 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return nil, nil, errors.New("response writer does not implement http.Hijacker")
 	}
 	return hijacker.Hijack()
+}
+
+func gameTestSeed() *int64 {
+	value := os.Getenv("GAME_TEST_SEED")
+	if value == "" {
+		return nil
+	}
+
+	seed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		slog.Warn("invalid GAME_TEST_SEED value; using time-seeded randomness", "value", value)
+		return nil
+	}
+	return &seed
 }
 
 func serverPort() string {

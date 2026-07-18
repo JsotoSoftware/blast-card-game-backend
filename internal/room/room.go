@@ -2,6 +2,7 @@ package room
 
 import (
 	"sync"
+	"time"
 
 	"exploding-game/server/internal/game"
 )
@@ -52,6 +53,7 @@ type Room struct {
 	mu           sync.RWMutex
 	id           string
 	players      map[string]*Player
+	playerOrder  []string
 	hostPlayerID string
 	engine       *game.Engine
 	state        *game.GameState
@@ -63,6 +65,7 @@ func newRoom(id string, host *Player, engine *game.Engine) *Room {
 	return &Room{
 		id:           id,
 		players:      map[string]*Player{host.ID: host},
+		playerOrder:  []string{host.ID},
 		hostPlayerID: host.ID,
 		engine:       engine,
 	}
@@ -140,6 +143,7 @@ func (r *Room) Join(player *Player) error {
 
 	player.Connected = true
 	r.players[player.ID] = player
+	r.playerOrder = append(r.playerOrder, player.ID)
 	return nil
 }
 
@@ -152,6 +156,7 @@ func (r *Room) Leave(playerID string) error {
 	}
 
 	delete(r.players, playerID)
+	r.removePlayerFromOrderLocked(playerID)
 	if r.kickVote != nil {
 		delete(r.kickVote.Approvals, playerID)
 		if r.kickVote.TargetPlayerID == playerID {
@@ -248,8 +253,9 @@ func (r *Room) validateCanStartLocked(requireReady bool) error {
 }
 
 func (r *Room) startGameLocked() ([]game.Event, error) {
-	players := make([]game.Player, 0, len(r.players))
-	for _, player := range r.players {
+	players := make([]game.Player, 0, len(r.playerOrder))
+	for _, playerID := range r.playerOrder {
+		player := r.players[playerID]
 		players = append(players, game.Player{
 			ID:        player.ID,
 			Name:      player.Name,
@@ -317,6 +323,58 @@ func (r *Room) CastKickVote(playerToken string, approve bool) (bool, string, err
 	return r.resolveKickVoteIfPassedLocked()
 }
 
+func (r *Room) DrawCard(playerToken string) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	player := r.playerByTokenLocked(playerToken)
+	if player == nil {
+		return nil, ErrInvalidPlayerToken
+	}
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.DrawCard(r.state, game.DrawCardCommand{PlayerID: player.ID})
+}
+
+func (r *Room) PlayCard(playerToken string, cardIDs []string, targetPlayerID string) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	player := r.playerByTokenLocked(playerToken)
+	if player == nil {
+		return nil, ErrInvalidPlayerToken
+	}
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.PlayCard(r.state, game.PlayCardCommand{PlayerID: player.ID, CardIDs: cardIDs, TargetID: targetPlayerID})
+}
+
+func (r *Room) PlaceExplosive(playerToken string, index int) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	player := r.playerByTokenLocked(playerToken)
+	if player == nil {
+		return nil, ErrInvalidPlayerToken
+	}
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.PlaceExplosive(r.state, game.PlaceExplosiveCommand{PlayerID: player.ID, Index: index})
+}
+
+func (r *Room) ExpireCancelWindow(now time.Time) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.ExpireCancelWindow(r.state, now)
+}
+
 func (r *Room) resolveKickVoteIfPassedLocked() (bool, string, error) {
 	if r.kickVote == nil {
 		return false, "", nil
@@ -328,10 +386,20 @@ func (r *Room) resolveKickVoteIfPassedLocked() (bool, string, error) {
 	targetID := r.kickVote.TargetPlayerID
 	r.kickVote = nil
 	delete(r.players, targetID)
+	r.removePlayerFromOrderLocked(targetID)
 	if r.hostPlayerID == targetID {
 		r.transferHostToAnyLocked()
 	}
 	return true, targetID, nil
+}
+
+func (r *Room) removePlayerFromOrderLocked(playerID string) {
+	for i, id := range r.playerOrder {
+		if id == playerID {
+			r.playerOrder = append(r.playerOrder[:i], r.playerOrder[i+1:]...)
+			return
+		}
+	}
 }
 
 func (r *Room) requiredKickApprovalsLocked() int {

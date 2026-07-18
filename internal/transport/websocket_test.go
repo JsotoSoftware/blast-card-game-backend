@@ -182,6 +182,187 @@ func TestWebSocketReadyStartAndRoomViewBroadcast(t *testing.T) {
 	}
 }
 
+func TestWebSocketDrawAndPlayCardCommands(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, _ := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	if _, err := manager.StartGameWithoutAuth(hostSession.RoomID); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	roomValue, exists := manager.GetRoom(hostSession.RoomID)
+	if !exists {
+		t.Fatal("room should exist")
+	}
+	state := roomValue.State()
+	hostPlayerIndex := -1
+	for i, player := range state.Players {
+		if player.ID == hostSession.PlayerID {
+			hostPlayerIndex = i
+			break
+		}
+	}
+	if hostPlayerIndex < 0 {
+		t.Fatal("host should be in game state")
+	}
+
+	state.Phase = game.PhasePlayerTurn
+	state.CurrentPlayerID = hostSession.PlayerID
+	state.TurnDebt[hostSession.PlayerID] = 1
+	state.DrawPile = []game.Card{{ID: "draw-transport-1", Code: game.CardShield}}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "DRAW_CARD", RequestID: "draw", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	drawEventsEnvelope := readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	var drawEvents struct {
+		Events []game.Event `json:"events"`
+	}
+	if err := json.Unmarshal(drawEventsEnvelope.Payload, &drawEvents); err != nil {
+		t.Fatalf("Unmarshal draw events returned error: %v", err)
+	}
+	if len(drawEvents.Events) == 0 || drawEvents.Events[0].Type != game.EventCardDrawn {
+		t.Fatalf("unexpected draw events: %#v", drawEvents.Events)
+	}
+	readUntilServerEnvelope(t, hostConn, MessageGameView)
+
+	state.Phase = game.PhasePlayerTurn
+	state.CurrentPlayerID = hostSession.PlayerID
+	state.TurnDebt[hostSession.PlayerID] = 1
+	state.Players[hostPlayerIndex].Hand = append(state.Players[hostPlayerIndex].Hand, game.Card{ID: "skip-transport-1", Code: game.CardSkipTurn})
+	playPayload, err := json.Marshal(PlayCardPayload{CardIDs: []string{"skip-transport-1"}})
+	if err != nil {
+		t.Fatalf("Marshal play payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLAY_CARD", RequestID: "play", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: playPayload})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	playEventsEnvelope := readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	var playEvents struct {
+		Events []game.Event `json:"events"`
+	}
+	if err := json.Unmarshal(playEventsEnvelope.Payload, &playEvents); err != nil {
+		t.Fatalf("Unmarshal play events returned error: %v", err)
+	}
+	if len(playEvents.Events) < 2 || playEvents.Events[0].Type != game.EventCardPlayed || playEvents.Events[1].Type != game.EventActionPending {
+		t.Fatalf("unexpected play events: %#v", playEvents.Events)
+	}
+	viewEnvelope := readUntilServerEnvelope(t, hostConn, MessageGameView)
+	var view game.PlayerGameView
+	if err := json.Unmarshal(viewEnvelope.Payload, &view); err != nil {
+		t.Fatalf("Unmarshal game view returned error: %v", err)
+	}
+	if view.PendingAction == nil || view.PendingAction.Type != game.PendingPlayCard {
+		t.Fatalf("pending action got %#v, want PLAY_CARD", view.PendingAction)
+	}
+}
+
+func TestWebSocketExplosivePlacementIsAuthorizedAndPrivate(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, joinerSession := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	if _, err := manager.StartGameWithoutAuth(hostSession.RoomID); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	roomValue, exists := manager.GetRoom(hostSession.RoomID)
+	if !exists {
+		t.Fatal("room should exist")
+	}
+	state := roomValue.State()
+	hostIndex := -1
+	for i, player := range state.Players {
+		if player.ID == hostSession.PlayerID {
+			hostIndex = i
+			break
+		}
+	}
+	if hostIndex < 0 {
+		t.Fatal("host should be in game state")
+	}
+
+	state.Phase = game.PhasePlayerTurn
+	state.CurrentPlayerID = hostSession.PlayerID
+	state.TurnDebt[hostSession.PlayerID] = 1
+	state.Players[hostIndex].Hand = []game.Card{{ID: "shield-transport-1", Code: game.CardShield}}
+	state.DrawPile = []game.Card{
+		{ID: "danger-transport-1", Code: game.CardExplosive},
+		{ID: "draw-transport-1", Code: game.CardSkipTurn},
+	}
+
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "DRAW_CARD", RequestID: "draw-danger", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	hostPlacementView := readUntilServerEnvelope(t, hostConn, MessageGameView)
+	var hostView game.PlayerGameView
+	if err := json.Unmarshal(hostPlacementView.Payload, &hostView); err != nil {
+		t.Fatalf("Unmarshal host placement view returned error: %v", err)
+	}
+	if !containsCommand(hostView.AvailableActions, game.CommandPlaceExplosive) {
+		t.Fatalf("host actions got %#v, want PLACE_EXPLOSIVE", hostView.AvailableActions)
+	}
+
+	joinerEvents := readUntilServerEnvelope(t, joinerConn, MessageGameEvents)
+	joinerPlacementView := readUntilServerEnvelope(t, joinerConn, MessageGameView)
+	if strings.Contains(string(joinerEvents.Payload), "index") || strings.Contains(string(joinerPlacementView.Payload), "index") {
+		t.Fatal("explosive placement index must not be broadcast")
+	}
+	var joinerView game.PlayerGameView
+	if err := json.Unmarshal(joinerPlacementView.Payload, &joinerView); err != nil {
+		t.Fatalf("Unmarshal joiner placement view returned error: %v", err)
+	}
+	if containsCommand(joinerView.AvailableActions, game.CommandPlaceExplosive) {
+		t.Fatalf("joiner actions got %#v, must not include PLACE_EXPLOSIVE", joinerView.AvailableActions)
+	}
+
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLACE_EXPLOSIVE", RequestID: "place-without-index", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: json.RawMessage(`{}`)})
+	missingIndexResponse := readUntilServerEnvelope(t, hostConn, MessageCommandError)
+	var missingIndexError CommandErrorPayload
+	if err := json.Unmarshal(missingIndexResponse.Payload, &missingIndexError); err != nil {
+		t.Fatalf("Unmarshal missing-index error returned error: %v", err)
+	}
+	if missingIndexError.Code != "INVALID_PAYLOAD" {
+		t.Fatalf("missing-index error code got %s, want INVALID_PAYLOAD", missingIndexError.Code)
+	}
+
+	placementIndex := 1
+	placementPayload, err := json.Marshal(PlaceExplosivePayload{Index: &placementIndex})
+	if err != nil {
+		t.Fatalf("Marshal placement payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLACE_EXPLOSIVE", RequestID: "place-other-player", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: placementPayload})
+	invalidResponse := readUntilServerEnvelope(t, joinerConn, MessageCommandError)
+	var invalidError CommandErrorPayload
+	if err := json.Unmarshal(invalidResponse.Payload, &invalidError); err != nil {
+		t.Fatalf("Unmarshal placement error returned error: %v", err)
+	}
+	if invalidError.Code != "NOT_YOUR_TURN" {
+		t.Fatalf("placement error code got %s, want NOT_YOUR_TURN", invalidError.Code)
+	}
+
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLACE_EXPLOSIVE", RequestID: "place-danger", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: placementPayload})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	readUntilServerEnvelope(t, hostConn, MessageGameView)
+	joinerResolvedEvents := readUntilServerEnvelope(t, joinerConn, MessageGameEvents)
+	joinerResolvedView := readUntilServerEnvelope(t, joinerConn, MessageGameView)
+	if strings.Contains(string(joinerResolvedEvents.Payload), "index") || strings.Contains(string(joinerResolvedView.Payload), "index") {
+		t.Fatal("resolved explosive placement index must not be broadcast")
+	}
+	if state.DrawPile[1].ID != "danger-transport-1" {
+		t.Fatalf("explosive got %s, want danger-transport-1 at placement index", state.DrawPile[1].ID)
+	}
+}
+
 func TestWebSocketTransferHost(t *testing.T) {
 	manager := room.NewManager()
 	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
@@ -285,6 +466,15 @@ func TestWebSocketUnknownCommandReturnsError(t *testing.T) {
 	if payload.RequestID != "bad-1" || payload.Code != "UNKNOWN_COMMAND" {
 		t.Fatalf("unexpected error payload: %#v", payload)
 	}
+}
+
+func containsCommand(commands []game.CommandType, want game.CommandType) bool {
+	for _, command := range commands {
+		if command == want {
+			return true
+		}
+	}
+	return false
 }
 
 func newTestWebSocket(t *testing.T) (*websocket.Conn, func()) {

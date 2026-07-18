@@ -386,9 +386,15 @@ func (e *Engine) resolvePlayedCard(state *GameState, card Card, sourcePlayerID s
 	case CardShuffleDeck:
 		e.deckFactory.Shuffle(state.DrawPile)
 	case CardPeekDeck:
-		events = append(events, e.nextEvent(state, EventPrivatePromptSent, sourcePlayerID, topCardIDs(state.DrawPile, 3), ""))
+		peeked := topCards(state.DrawPile, 3)
+		event := e.nextEvent(state, EventPrivatePromptSent, sourcePlayerID, cardIDsOf(peeked), "")
+		event.Cards = peeked
+		events = append(events, event)
 	case CardPeekDeck5:
-		events = append(events, e.nextEvent(state, EventPrivatePromptSent, sourcePlayerID, topCardIDs(state.DrawPile, 5), ""))
+		peeked := topCards(state.DrawPile, 5)
+		event := e.nextEvent(state, EventPrivatePromptSent, sourcePlayerID, cardIDsOf(peeked), "")
+		event.Cards = peeked
+		events = append(events, event)
 	case CardRequestCard:
 		state.Phase = PhaseWaitingRequestCardChoice
 		state.PendingAction = &PendingAction{
@@ -795,15 +801,13 @@ func countCardsByCode(cards []Card, code CardCode) int {
 	return count
 }
 
-func topCardIDs(cards []Card, count int) []string {
+func topCards(cards []Card, count int) []Card {
 	if count > len(cards) {
 		count = len(cards)
 	}
-	ids := make([]string, count)
-	for i := range count {
-		ids[i] = cards[i].ID
-	}
-	return ids
+	result := make([]Card, count)
+	copy(result, cards[:count])
+	return result
 }
 
 func cardIDsOf(cards []Card) []string {

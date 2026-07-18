@@ -59,6 +59,15 @@ type CastKickVotePayload struct {
 	Approve bool `json:"approve"`
 }
 
+type PlayCardPayload struct {
+	CardIDs  []string `json:"cardIds"`
+	TargetID string   `json:"targetId,omitempty"`
+}
+
+type PlaceExplosivePayload struct {
+	Index *int `json:"index"`
+}
+
 type CommandAckPayload struct {
 	RequestID string `json:"requestId,omitempty"`
 }

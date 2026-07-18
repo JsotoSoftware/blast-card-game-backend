@@ -10,18 +10,22 @@ import (
 	"sync/atomic"
 	"time"
 
+	"exploding-game/server/internal/game"
 	"exploding-game/server/internal/room"
 
 	"github.com/coder/websocket"
 )
 
 const (
+	cancelWindowBroadcastDelay = 10100 * time.Millisecond
+
 	MessagePong             = "PONG"
 	MessageCommandAck       = "COMMAND_ACK"
 	MessageRoomCreated      = "ROOM_CREATED"
 	MessageRoomJoined       = "ROOM_JOINED"
 	MessageRoomView         = "ROOM_VIEW"
 	MessageGameView         = "GAME_VIEW"
+	MessageGameEvents       = "GAME_EVENTS"
 	MessageGameStarted      = "GAME_STARTED"
 	MessageHostTransferred  = "HOST_TRANSFERRED"
 	MessageKickVoteStarted  = "KICK_VOTE_STARTED"
@@ -123,6 +127,12 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, client *connectedC
 		return h.handleStartKickVote(ctx, client, envelope)
 	case "CAST_KICK_VOTE":
 		return h.handleCastKickVote(ctx, client, envelope)
+	case "DRAW_CARD":
+		return h.handleDrawCard(ctx, client, envelope)
+	case "PLAY_CARD":
+		return h.handlePlayCard(ctx, client, envelope)
+	case "PLACE_EXPLOSIVE":
+		return h.handlePlaceExplosive(ctx, client, envelope)
 	default:
 		return h.writeError(ctx, client, envelope.RequestID, "UNKNOWN_COMMAND", "Unknown command type.")
 	}
@@ -312,6 +322,82 @@ func (h *WebSocketHandler) handleCastKickVote(ctx context.Context, client *conne
 	return h.broadcastRoomView(ctx, roomID)
 }
 
+func (h *WebSocketHandler) handleDrawCard(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
+	roomID, token, err := h.sessionForCommand(client, envelope)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	events, err := h.manager.DrawCard(roomID, token)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
+}
+
+func (h *WebSocketHandler) handlePlayCard(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
+	roomID, token, err := h.sessionForCommand(client, envelope)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	var payload PlayCardPayload
+	if err := decodePayload(envelope.Payload, &payload); err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, "INVALID_PAYLOAD", "Invalid PLAY_CARD payload.")
+	}
+
+	events, err := h.manager.PlayCard(roomID, token, payload.CardIDs, payload.TargetID)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	h.scheduleCancelWindowExpiration(roomID)
+	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
+}
+
+func (h *WebSocketHandler) handlePlaceExplosive(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
+	roomID, token, err := h.sessionForCommand(client, envelope)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	var payload PlaceExplosivePayload
+	if err := decodePayload(envelope.Payload, &payload); err != nil || payload.Index == nil {
+		return h.writeError(ctx, client, envelope.RequestID, "INVALID_PAYLOAD", "Invalid PLACE_EXPLOSIVE payload.")
+	}
+
+	events, err := h.manager.PlaceExplosive(roomID, token, *payload.Index)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
+}
+
+func (h *WebSocketHandler) ackEventsAndViews(ctx context.Context, client *connectedClient, roomID string, requestID string, events []game.Event) error {
+	if err := h.writeEnvelope(ctx, client, MessageCommandAck, CommandAckPayload{RequestID: requestID}); err != nil {
+		return err
+	}
+	if err := h.broadcastGameEvents(ctx, roomID, events); err != nil {
+		return err
+	}
+	return h.broadcastGameViews(ctx, roomID)
+}
+
+func (h *WebSocketHandler) scheduleCancelWindowExpiration(roomID string) {
+	time.AfterFunc(cancelWindowBroadcastDelay, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		events, err := h.manager.ExpireCancelWindow(roomID, time.Now())
+		if err != nil {
+			return
+		}
+		if err := h.broadcastGameEvents(ctx, roomID, events); err != nil {
+			h.logger.Info("failed to broadcast expired cancel-window events", "roomId", roomID, "error", err)
+			return
+		}
+		if err := h.broadcastGameViews(ctx, roomID); err != nil {
+			h.logger.Info("failed to broadcast expired cancel-window game views", "roomId", roomID, "error", err)
+		}
+	})
+}
+
 func (h *WebSocketHandler) sessionForCommand(client *connectedClient, envelope ClientEnvelope) (string, string, error) {
 	roomID := firstNonEmpty(envelope.RoomID, client.roomID)
 	token := firstNonEmpty(envelope.PlayerToken, client.token)
@@ -347,6 +433,20 @@ func (h *WebSocketHandler) broadcastGameViews(ctx context.Context, roomID string
 			continue
 		}
 		if err := h.writeEnvelope(ctx, client, MessageGameView, view); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *WebSocketHandler) broadcastGameEvents(ctx context.Context, roomID string, events []game.Event) error {
+	clients := h.roomClients(roomID)
+	for _, client := range clients {
+		filtered := game.FilterEventsForPlayer(events, client.playerID)
+		if len(filtered) == 0 {
+			continue
+		}
+		if err := h.writeEnvelope(ctx, client, MessageGameEvents, map[string]any{"events": filtered}); err != nil {
 			return err
 		}
 	}
@@ -535,6 +635,34 @@ func errorCode(err error) string {
 		return "CANNOT_VOTE_KICK_SELF"
 	case errors.Is(err, room.ErrInvalidKickVoteTarget):
 		return "INVALID_KICK_VOTE_TARGET"
+	case errors.Is(err, room.ErrGameNotStarted):
+		return "GAME_NOT_STARTED"
+	case errors.Is(err, game.ErrInvalidPhase):
+		return "INVALID_PHASE"
+	case errors.Is(err, game.ErrNotYourTurn):
+		return "NOT_YOUR_TURN"
+	case errors.Is(err, game.ErrPlayerNotFound):
+		return "PLAYER_NOT_FOUND"
+	case errors.Is(err, game.ErrPlayerNotAlive):
+		return "PLAYER_NOT_ALIVE"
+	case errors.Is(err, game.ErrCardNotInHand):
+		return "CARD_NOT_IN_HAND"
+	case errors.Is(err, game.ErrInvalidCardPlay):
+		return "INVALID_CARD_PLAY"
+	case errors.Is(err, game.ErrTargetRequired):
+		return "TARGET_REQUIRED"
+	case errors.Is(err, game.ErrInvalidTarget):
+		return "INVALID_TARGET"
+	case errors.Is(err, game.ErrDrawPileEmpty):
+		return "DRAW_PILE_EMPTY"
+	case errors.Is(err, game.ErrNoPendingAction):
+		return "NO_PENDING_ACTION"
+	case errors.Is(err, game.ErrInvalidPlacement):
+		return "INVALID_PLACEMENT"
+	case errors.Is(err, game.ErrActionNotCancelable):
+		return "ACTION_NOT_CANCELABLE"
+	case errors.Is(err, game.ErrCancelWindowActive):
+		return "CANCEL_WINDOW_ACTIVE"
 	default:
 		return "COMMAND_FAILED"
 	}

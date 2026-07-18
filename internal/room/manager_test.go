@@ -2,8 +2,11 @@ package room
 
 import (
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
+
+	"exploding-game/server/internal/game"
 )
 
 func TestCreateRoomsHaveDifferentIDs(t *testing.T) {
@@ -253,6 +256,76 @@ func TestKickVoteRemovesTargetAndTransfersHostIfNeeded(t *testing.T) {
 	if view.HostPlayerID == "" || view.HostPlayerID == host.ID {
 		t.Fatalf("host should transfer away from kicked host, got %s", view.HostPlayerID)
 	}
+}
+
+func TestFixedSeedProducesRepeatableSetup(t *testing.T) {
+	stateA := seededTestGameState(t, 42)
+	stateB := seededTestGameState(t, 42)
+
+	if !reflect.DeepEqual(gameCardCodes(stateA.DrawPile), gameCardCodes(stateB.DrawPile)) {
+		t.Fatalf("draw piles differ for the same seed: %v != %v", gameCardCodes(stateA.DrawPile), gameCardCodes(stateB.DrawPile))
+	}
+	for i := range stateA.Players {
+		if stateA.Players[i].Name != stateB.Players[i].Name {
+			t.Fatalf("player %d name got %s, want %s", i, stateA.Players[i].Name, stateB.Players[i].Name)
+		}
+		if !reflect.DeepEqual(gameCardCodes(stateA.Players[i].Hand), gameCardCodes(stateB.Players[i].Hand)) {
+			t.Fatalf("hand %d differs for the same seed", i)
+		}
+	}
+}
+
+func TestJoinOrderRemainsCurrentAfterLeaveAndReplacement(t *testing.T) {
+	manager := NewManagerWithSeed(42)
+	room, host, err := manager.CreateRoom("host")
+	if err != nil {
+		t.Fatalf("CreateRoom returned error: %v", err)
+	}
+	if _, err := manager.JoinRoom(room.ID(), "survivor"); err != nil {
+		t.Fatalf("JoinRoom survivor returned error: %v", err)
+	}
+	if err := manager.LeaveRoom(room.ID(), host.ID); err != nil {
+		t.Fatalf("LeaveRoom host returned error: %v", err)
+	}
+	if _, err := manager.JoinRoom(room.ID(), "replacement"); err != nil {
+		t.Fatalf("JoinRoom replacement returned error: %v", err)
+	}
+	if _, err := manager.StartGameWithoutAuth(room.ID()); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+
+	state := room.State()
+	if len(state.Players) != 2 || state.Players[0].Name != "survivor" || state.Players[1].Name != "replacement" {
+		t.Fatalf("started players got %#v, want survivor then replacement", state.Players)
+	}
+}
+
+func seededTestGameState(t *testing.T, seed int64) *game.GameState {
+	t.Helper()
+
+	manager := NewManagerWithSeed(seed)
+	room, _, err := manager.CreateRoom("host")
+	if err != nil {
+		t.Fatalf("CreateRoom returned error: %v", err)
+	}
+	if _, err := manager.JoinRoom(room.ID(), "player-a"); err != nil {
+		t.Fatalf("JoinRoom player-a returned error: %v", err)
+	}
+	if _, err := manager.JoinRoom(room.ID(), "player-b"); err != nil {
+		t.Fatalf("JoinRoom player-b returned error: %v", err)
+	}
+	if _, err := manager.StartGameWithoutAuth(room.ID()); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	return room.State()
+}
+
+func gameCardCodes(cards []game.Card) []game.CardCode {
+	codes := make([]game.CardCode, len(cards))
+	for i, card := range cards {
+		codes[i] = card.Code
+	}
+	return codes
 }
 
 func TestManagerConcurrentAccess(t *testing.T) {

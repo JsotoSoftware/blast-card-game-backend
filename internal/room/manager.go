@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"errors"
 	"math/big"
+	mathrand "math/rand"
 	"sync"
+	"time"
 
 	"exploding-game/server/internal/game"
 )
@@ -29,15 +31,30 @@ var (
 	ErrNoKickVoteActive      = errors.New("no kick vote active")
 	ErrCannotVoteKickSelf    = errors.New("cannot vote kick self")
 	ErrInvalidKickVoteTarget = errors.New("invalid kick vote target")
+	ErrGameNotStarted        = errors.New("game not started")
 )
 
 type Manager struct {
-	mu    sync.RWMutex
-	rooms map[string]*Room
+	mu        sync.RWMutex
+	rooms     map[string]*Room
+	fixedSeed *int64
 }
 
 func NewManager() *Manager {
 	return &Manager{rooms: map[string]*Room{}}
+}
+
+// NewManagerWithSeed creates deterministic game engines for test environments.
+// Production code should use NewManager.
+func NewManagerWithSeed(seed int64) *Manager {
+	return &Manager{rooms: map[string]*Room{}, fixedSeed: &seed}
+}
+
+func (m *Manager) newEngine() *game.Engine {
+	if m.fixedSeed == nil {
+		return game.NewEngine(nil)
+	}
+	return game.NewEngine(mathrand.New(mathrand.NewSource(*m.fixedSeed)))
 }
 
 func (m *Manager) CreateRoom(hostName string) (*Room, *Player, error) {
@@ -54,7 +71,7 @@ func (m *Manager) CreateRoom(hostName string) (*Room, *Player, error) {
 		return nil, nil, err
 	}
 
-	room := newRoom(roomID, host, game.NewEngine(nil))
+	room := newRoom(roomID, host, m.newEngine())
 	m.rooms[roomID] = room
 	return room, host, nil
 }
@@ -162,6 +179,38 @@ func (m *Manager) CastKickVote(roomID string, playerToken string, approve bool) 
 		return false, "", ErrRoomNotFound
 	}
 	return room.CastKickVote(playerToken, approve)
+}
+
+func (m *Manager) DrawCard(roomID string, playerToken string) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.DrawCard(playerToken)
+}
+
+func (m *Manager) PlayCard(roomID string, playerToken string, cardIDs []string, targetPlayerID string) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.PlayCard(playerToken, cardIDs, targetPlayerID)
+}
+
+func (m *Manager) PlaceExplosive(roomID string, playerToken string, index int) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.PlaceExplosive(playerToken, index)
+}
+
+func (m *Manager) ExpireCancelWindow(roomID string, now time.Time) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.ExpireCancelWindow(now)
 }
 
 func (m *Manager) RoomView(roomID string) (RoomView, error) {

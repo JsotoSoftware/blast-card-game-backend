@@ -21,6 +21,7 @@ type Event struct {
 	Type     EventType `json:"type"`
 	PlayerID string    `json:"playerId,omitempty"`
 	CardIDs  []string  `json:"cardIds,omitempty"`
+	Cards    []Card    `json:"cards,omitempty"`
 	TargetID string    `json:"targetId,omitempty"`
 	Message  string    `json:"message,omitempty"`
 }
