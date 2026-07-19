@@ -72,6 +72,11 @@ type ChooseCardForRequestPayload struct {
 	CardID string `json:"cardId"`
 }
 
+type PlayCancelPayload struct {
+	CardID          string `json:"cardId,omitempty"`
+	PendingActionID string `json:"pendingActionId,omitempty"`
+}
+
 type CommandAckPayload struct {
 	RequestID string `json:"requestId,omitempty"`
 }

@@ -213,6 +213,14 @@ func (m *Manager) ChooseCardForRequest(roomID string, playerToken string, cardID
 	return room.ChooseCardForRequest(playerToken, cardID)
 }
 
+func (m *Manager) PlayCancel(roomID string, playerToken string, cardID string, pendingActionID string) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.PlayCancel(playerToken, cardID, pendingActionID)
+}
+
 func (m *Manager) ExpireCancelWindow(roomID string, now time.Time) ([]game.Event, error) {
 	room, exists := m.GetRoom(roomID)
 	if !exists {

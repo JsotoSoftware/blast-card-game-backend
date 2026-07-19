@@ -379,6 +379,20 @@ func (r *Room) ChooseCardForRequest(playerToken string, cardID string) ([]game.E
 	return r.engine.ChooseCardForRequest(r.state, game.ChooseCardForRequestCommand{PlayerID: player.ID, CardID: cardID})
 }
 
+func (r *Room) PlayCancel(playerToken string, cardID string, pendingActionID string) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	player := r.playerByTokenLocked(playerToken)
+	if player == nil {
+		return nil, ErrInvalidPlayerToken
+	}
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.PlayCancel(r.state, game.PlayCancelCommand{PlayerID: player.ID, CardID: cardID, PendingActionID: pendingActionID})
+}
+
 func (r *Room) ExpireCancelWindow(now time.Time) ([]game.Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

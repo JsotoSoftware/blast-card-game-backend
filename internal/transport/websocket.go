@@ -135,6 +135,8 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, client *connectedC
 		return h.handlePlaceExplosive(ctx, client, envelope)
 	case "CHOOSE_CARD_FOR_REQUEST":
 		return h.handleChooseCardForRequest(ctx, client, envelope)
+	case "PLAY_CANCEL":
+		return h.handlePlayCancel(ctx, client, envelope)
 	default:
 		return h.writeError(ctx, client, envelope.RequestID, "UNKNOWN_COMMAND", "Unknown command type.")
 	}
@@ -382,6 +384,23 @@ func (h *WebSocketHandler) handleChooseCardForRequest(ctx context.Context, clien
 	}
 
 	events, err := h.manager.ChooseCardForRequest(roomID, token, payload.CardID)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
+}
+
+func (h *WebSocketHandler) handlePlayCancel(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
+	roomID, token, err := h.sessionForCommand(client, envelope)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	var payload PlayCancelPayload
+	if err := decodePayload(envelope.Payload, &payload); err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, "INVALID_PAYLOAD", "Invalid PLAY_CANCEL payload.")
+	}
+
+	events, err := h.manager.PlayCancel(roomID, token, payload.CardID, payload.PendingActionID)
 	if err != nil {
 		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
 	}

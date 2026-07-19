@@ -363,6 +363,86 @@ func TestWebSocketExplosivePlacementIsAuthorizedAndPrivate(t *testing.T) {
 	}
 }
 
+func TestWebSocketPlayCancelUpdatesCancelWindow(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, joinerSession := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	if _, err := manager.StartGameWithoutAuth(hostSession.RoomID); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	roomValue, exists := manager.GetRoom(hostSession.RoomID)
+	if !exists {
+		t.Fatal("room should exist")
+	}
+	state := roomValue.State()
+	joinerIndex := -1
+	for i, player := range state.Players {
+		if player.ID == joinerSession.PlayerID {
+			joinerIndex = i
+			break
+		}
+	}
+	if joinerIndex < 0 {
+		t.Fatal("joiner should be in game state")
+	}
+	state.Phase = game.PhaseCancelWindow
+	state.CurrentPlayerID = hostSession.PlayerID
+	state.PendingAction = &game.PendingAction{
+		ID:              "cancel-pending-1",
+		SourcePlayerID:  hostSession.PlayerID,
+		TargetPlayerID:  joinerSession.PlayerID,
+		Type:            game.PendingPlayCard,
+		Cards:           []game.Card{{ID: "skip-pending-1", Code: game.CardSkipTurn}},
+		ExpiresAtUnixMs: time.Now().Add(time.Minute).UnixMilli(),
+	}
+	state.Players[joinerIndex].Hand = []game.Card{{ID: "cancel-transport-1", Code: game.CardCancel}}
+
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLAY_CANCEL", RequestID: "bad-cancel", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: json.RawMessage(`"bad"`)})
+	badPayloadResponse := readUntilServerEnvelope(t, joinerConn, MessageCommandError)
+	var badPayloadError CommandErrorPayload
+	if err := json.Unmarshal(badPayloadResponse.Payload, &badPayloadError); err != nil {
+		t.Fatalf("Unmarshal cancel payload error returned error: %v", err)
+	}
+	if badPayloadError.Code != "INVALID_PAYLOAD" {
+		t.Fatalf("cancel payload error code got %s, want INVALID_PAYLOAD", badPayloadError.Code)
+	}
+
+	payload, err := json.Marshal(PlayCancelPayload{CardID: "cancel-transport-1", PendingActionID: "cancel-pending-1"})
+	if err != nil {
+		t.Fatalf("Marshal cancel payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLAY_CANCEL", RequestID: "play-cancel", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: payload})
+	readUntilServerEnvelope(t, joinerConn, MessageCommandAck)
+	readUntilServerEnvelope(t, joinerConn, MessageGameEvents)
+	readUntilServerEnvelope(t, joinerConn, MessageGameView)
+	readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	hostViewEnvelope := readUntilServerEnvelope(t, hostConn, MessageGameView)
+	var hostView game.PlayerGameView
+	if err := json.Unmarshal(hostViewEnvelope.Payload, &hostView); err != nil {
+		t.Fatalf("Unmarshal host cancel view returned error: %v", err)
+	}
+	if hostView.PendingAction == nil || hostView.PendingAction.CancelCount != 1 {
+		t.Fatalf("cancel view got %#v, want count 1", hostView.PendingAction)
+	}
+
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLAY_CANCEL", RequestID: "duplicate-cancel", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: payload})
+	duplicateResponse := readUntilServerEnvelope(t, joinerConn, MessageCommandError)
+	var duplicateError CommandErrorPayload
+	if err := json.Unmarshal(duplicateResponse.Payload, &duplicateError); err != nil {
+		t.Fatalf("Unmarshal duplicate cancel error returned error: %v", err)
+	}
+	if duplicateError.Code != "CARD_NOT_IN_HAND" || state.PendingAction.CancelCount != 1 {
+		t.Fatalf("duplicate cancel got code=%s count=%d, want CARD_NOT_IN_HAND and 1", duplicateError.Code, state.PendingAction.CancelCount)
+	}
+}
+
 func TestWebSocketRequestCardChoiceTransfersWithoutPublicCardIdentity(t *testing.T) {
 	manager := room.NewManager()
 	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
