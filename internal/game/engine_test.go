@@ -361,8 +361,58 @@ func TestRequestCardCreatesPrivatePrompt(t *testing.T) {
 	if state.PendingAction == nil || state.PendingAction.TargetPlayerID != "p2" {
 		t.Fatalf("expected request pending action for p2, got %#v", state.PendingAction)
 	}
+	p1View, err := BuildViewForPlayer(state, "p1")
+	if err != nil {
+		t.Fatalf("BuildViewForPlayer p1 returned error: %v", err)
+	}
+	p2View, err := BuildViewForPlayer(state, "p2")
+	if err != nil {
+		t.Fatalf("BuildViewForPlayer p2 returned error: %v", err)
+	}
+	if commandListContains(p1View.AvailableActions, CommandChooseCardForRequest) || !commandListContains(p2View.AvailableActions, CommandChooseCardForRequest) {
+		t.Fatalf("request actions source=%#v target=%#v, want only target to choose", p1View.AvailableActions, p2View.AvailableActions)
+	}
 	if !hasEvent(events, EventPrivatePromptSent) {
 		t.Fatalf("expected private prompt event, got %#v", events)
+	}
+}
+
+func TestRequestCardTargetChoosesAndTransfersCardPrivately(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(23)))
+	state := engineTestState([]Player{
+		engineTestPlayer("p1", []Card{engineTestCard("request-1", CardRequestCard)}),
+		engineTestPlayer("p2", []Card{engineTestCard("give-1", CardSkipTurn), engineTestCard("keep-1", CardShuffleDeck)}),
+	}, nil, "p1")
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"request-1"}, TargetID: "p2"}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(state); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if _, err := engine.ChooseCardForRequest(state, ChooseCardForRequestCommand{PlayerID: "p1", CardID: "give-1"}); !errors.Is(err, ErrNotYourTurn) {
+		t.Fatalf("non-target choice error got %v, want ErrNotYourTurn", err)
+	}
+	if _, err := engine.ChooseCardForRequest(state, ChooseCardForRequestCommand{PlayerID: "p2", CardID: "missing"}); !errors.Is(err, ErrCardNotInHand) {
+		t.Fatalf("missing card choice error got %v, want ErrCardNotInHand", err)
+	}
+
+	events, err := engine.ChooseCardForRequest(state, ChooseCardForRequestCommand{PlayerID: "p2", CardID: "give-1"})
+	if err != nil {
+		t.Fatalf("ChooseCardForRequest returned error: %v", err)
+	}
+	if state.Phase != PhasePlayerTurn || state.PendingAction != nil {
+		t.Fatalf("request state got phase=%s pending=%#v, want player turn without pending action", state.Phase, state.PendingAction)
+	}
+	if len(state.Players[0].Hand) != 1 || state.Players[0].Hand[0].ID != "give-1" {
+		t.Fatalf("source hand got %#v, want transferred card", state.Players[0].Hand)
+	}
+	if len(state.Players[1].Hand) != 1 || state.Players[1].Hand[0].ID != "keep-1" {
+		t.Fatalf("target hand got %#v, want unselected card", state.Players[1].Hand)
+	}
+	if len(events) != 1 || events[0].Type != EventActionResolved || len(events[0].CardIDs) != 0 || events[0].TargetID != "p2" {
+		t.Fatalf("request resolution event got %#v, want public transfer without card identity", events)
 	}
 }
 

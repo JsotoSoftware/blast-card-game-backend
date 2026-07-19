@@ -63,6 +63,11 @@ type PlayCancelCommand struct {
 	PendingActionID string `json:"pendingActionId,omitempty"`
 }
 
+type ChooseCardForRequestCommand struct {
+	PlayerID string `json:"playerId"`
+	CardID   string `json:"cardId"`
+}
+
 type ChooseCardFromDiscardCommand struct {
 	PlayerID string `json:"playerId"`
 	CardID   string `json:"cardId"`

@@ -68,6 +68,10 @@ type PlaceExplosivePayload struct {
 	Index *int `json:"index"`
 }
 
+type ChooseCardForRequestPayload struct {
+	CardID string `json:"cardId"`
+}
+
 type CommandAckPayload struct {
 	RequestID string `json:"requestId,omitempty"`
 }

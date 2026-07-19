@@ -205,6 +205,14 @@ func (m *Manager) PlaceExplosive(roomID string, playerToken string, index int) (
 	return room.PlaceExplosive(playerToken, index)
 }
 
+func (m *Manager) ChooseCardForRequest(roomID string, playerToken string, cardID string) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.ChooseCardForRequest(playerToken, cardID)
+}
+
 func (m *Manager) ExpireCancelWindow(roomID string, now time.Time) ([]game.Event, error) {
 	room, exists := m.GetRoom(roomID)
 	if !exists {

@@ -365,6 +365,20 @@ func (r *Room) PlaceExplosive(playerToken string, index int) ([]game.Event, erro
 	return r.engine.PlaceExplosive(r.state, game.PlaceExplosiveCommand{PlayerID: player.ID, Index: index})
 }
 
+func (r *Room) ChooseCardForRequest(playerToken string, cardID string) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	player := r.playerByTokenLocked(playerToken)
+	if player == nil {
+		return nil, ErrInvalidPlayerToken
+	}
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.ChooseCardForRequest(r.state, game.ChooseCardForRequestCommand{PlayerID: player.ID, CardID: cardID})
+}
+
 func (r *Room) ExpireCancelWindow(now time.Time) ([]game.Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

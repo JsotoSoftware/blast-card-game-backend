@@ -333,6 +333,40 @@ func (e *Engine) ResolveCancelWindow(state *GameState) ([]Event, error) {
 	}
 }
 
+func (e *Engine) ChooseCardForRequest(state *GameState, cmd ChooseCardForRequestCommand) ([]Event, error) {
+	if state.Phase != PhaseWaitingRequestCardChoice {
+		return nil, ErrInvalidPhase
+	}
+	if state.PendingAction == nil || state.PendingAction.Type != PendingRequestCardChoice {
+		return nil, ErrNoPendingAction
+	}
+	if state.PendingAction.TargetPlayerID != cmd.PlayerID {
+		return nil, ErrNotYourTurn
+	}
+
+	targetIndex, target, err := currentAlivePlayer(state, cmd.PlayerID)
+	if err != nil {
+		return nil, err
+	}
+	sourceIndex, _, err := currentAlivePlayer(state, state.PendingAction.SourcePlayerID)
+	if err != nil {
+		return nil, err
+	}
+	cardIndex := findCardIndexByID(target.Hand, cmd.CardID)
+	if cardIndex < 0 {
+		return nil, ErrCardNotInHand
+	}
+
+	card := target.Hand[cardIndex]
+	state.Players[targetIndex].Hand = removeCardAt(target.Hand, cardIndex)
+	state.Players[sourceIndex].Hand = append(state.Players[sourceIndex].Hand, card)
+	pending := state.PendingAction
+	state.PendingAction = nil
+	state.Phase = PhasePlayerTurn
+
+	return []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, nil, pending.TargetPlayerID)}, nil
+}
+
 func (e *Engine) ChooseCardFromDiscard(state *GameState, cmd ChooseCardFromDiscardCommand) ([]Event, error) {
 	if state.Phase != PhaseWaitingDiscardRecovery {
 		return nil, ErrInvalidPhase

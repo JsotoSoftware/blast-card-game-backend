@@ -363,6 +363,90 @@ func TestWebSocketExplosivePlacementIsAuthorizedAndPrivate(t *testing.T) {
 	}
 }
 
+func TestWebSocketRequestCardChoiceTransfersWithoutPublicCardIdentity(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, joinerSession := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	if _, err := manager.StartGameWithoutAuth(hostSession.RoomID); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	roomValue, exists := manager.GetRoom(hostSession.RoomID)
+	if !exists {
+		t.Fatal("room should exist")
+	}
+	state := roomValue.State()
+	hostIndex, joinerIndex := -1, -1
+	for i, player := range state.Players {
+		switch player.ID {
+		case hostSession.PlayerID:
+			hostIndex = i
+		case joinerSession.PlayerID:
+			joinerIndex = i
+		}
+	}
+	if hostIndex < 0 || joinerIndex < 0 {
+		t.Fatal("host and joiner should be in game state")
+	}
+	state.Phase = game.PhaseWaitingRequestCardChoice
+	state.CurrentPlayerID = hostSession.PlayerID
+	state.PendingAction = &game.PendingAction{
+		ID:             "request-pending-1",
+		SourcePlayerID: hostSession.PlayerID,
+		TargetPlayerID: joinerSession.PlayerID,
+		Type:           game.PendingRequestCardChoice,
+	}
+	state.Players[hostIndex].Hand = nil
+	state.Players[joinerIndex].Hand = []game.Card{{ID: "private-transfer-1", Code: game.CardSkipTurn}}
+
+	payload, err := json.Marshal(ChooseCardForRequestPayload{CardID: "private-transfer-1"})
+	if err != nil {
+		t.Fatalf("Marshal request choice payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_CARD_FOR_REQUEST", RequestID: "choose-as-source", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: payload})
+	notTargetResponse := readUntilServerEnvelope(t, hostConn, MessageCommandError)
+	var notTargetError CommandErrorPayload
+	if err := json.Unmarshal(notTargetResponse.Payload, &notTargetError); err != nil {
+		t.Fatalf("Unmarshal request choice error returned error: %v", err)
+	}
+	if notTargetError.Code != "NOT_YOUR_TURN" {
+		t.Fatalf("request choice error code got %s, want NOT_YOUR_TURN", notTargetError.Code)
+	}
+
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_CARD_FOR_REQUEST", RequestID: "choose-without-card", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: json.RawMessage(`{}`)})
+	missingCardResponse := readUntilServerEnvelope(t, joinerConn, MessageCommandError)
+	var missingCardError CommandErrorPayload
+	if err := json.Unmarshal(missingCardResponse.Payload, &missingCardError); err != nil {
+		t.Fatalf("Unmarshal missing-card error returned error: %v", err)
+	}
+	if missingCardError.Code != "INVALID_PAYLOAD" {
+		t.Fatalf("missing-card error code got %s, want INVALID_PAYLOAD", missingCardError.Code)
+	}
+
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_CARD_FOR_REQUEST", RequestID: "choose-card", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: payload})
+	readUntilServerEnvelope(t, joinerConn, MessageCommandAck)
+	readUntilServerEnvelope(t, joinerConn, MessageGameEvents)
+	readUntilServerEnvelope(t, joinerConn, MessageGameView)
+	hostEvents := readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	if strings.Contains(string(hostEvents.Payload), "private-transfer-1") || strings.Contains(string(hostEvents.Payload), string(game.CardSkipTurn)) {
+		t.Fatal("public request-transfer event must not reveal the selected card")
+	}
+	hostViewEnvelope := readUntilServerEnvelope(t, hostConn, MessageGameView)
+	var hostView game.PlayerGameView
+	if err := json.Unmarshal(hostViewEnvelope.Payload, &hostView); err != nil {
+		t.Fatalf("Unmarshal host request view returned error: %v", err)
+	}
+	if len(hostView.You.Hand) != 1 || hostView.You.Hand[0].ID != "private-transfer-1" {
+		t.Fatalf("source private hand got %#v, want transferred card", hostView.You.Hand)
+	}
+}
+
 func TestWebSocketTransferHost(t *testing.T) {
 	manager := room.NewManager()
 	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
