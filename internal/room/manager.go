@@ -221,6 +221,22 @@ func (m *Manager) PlayCancel(roomID string, playerToken string, cardID string, p
 	return room.PlayCancel(playerToken, cardID, pendingActionID)
 }
 
+func (m *Manager) PlayCombo(roomID string, playerToken string, cardIDs []string, targetPlayerID string, requestedCode game.CardCode) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.PlayCombo(playerToken, cardIDs, targetPlayerID, requestedCode)
+}
+
+func (m *Manager) ChooseCardFromDiscard(roomID string, playerToken string, cardID string) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.ChooseCardFromDiscard(playerToken, cardID)
+}
+
 func (m *Manager) ExpireCancelWindow(roomID string, now time.Time) ([]game.Event, error) {
 	room, exists := m.GetRoom(roomID)
 	if !exists {

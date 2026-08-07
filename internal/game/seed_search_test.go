@@ -14,6 +14,8 @@ const (
 	seedSearchSecondHandCard                    = CardRequestCard
 	seedSearchCancelOverCancelAction            = CardRequestCard
 	seedSearchCancelOverCancelResponse          = CardCancel
+	seedSearchComboCard                         = CardSkipTurn
+	seedSearchComboCardCount                    = 2
 	seedSearchPlayerCount                       = 2
 	seedSearchMax                               = int64(100_000)
 )
@@ -104,6 +106,36 @@ func TestFindSeedForCancelOverCancelOpeningHands(t *testing.T) {
 	}
 
 	t.Fatalf("no seed below %d gives %s and %s to one player plus %s to another", seedSearchMax, seedSearchCancelOverCancelAction, seedSearchCancelOverCancelResponse, seedSearchCancelOverCancelResponse)
+}
+
+// TestFindSeedForOpeningCombo finds a seed where player 1 has the configured
+// matching cards and player 2 can be targeted by a pair combo. Run it with:
+// RUN_SEED_SEARCH=1 go test ./internal/game -run TestFindSeedForOpeningCombo -v
+func TestFindSeedForOpeningCombo(t *testing.T) {
+	if os.Getenv("RUN_SEED_SEARCH") != "1" {
+		t.Skip("set RUN_SEED_SEARCH=1 to run the seed search")
+	}
+	if seedSearchPlayerCount < 2 {
+		t.Fatal("seedSearchPlayerCount must be at least 2 for a pair target")
+	}
+	if seedSearchComboCardCount < 2 {
+		t.Fatal("seedSearchComboCardCount must be at least 2 for a pair combo")
+	}
+
+	players := seedSearchPlayers(seedSearchPlayerCount)
+	for seed := int64(0); seed < seedSearchMax; seed++ {
+		engine := NewEngine(rand.New(rand.NewSource(seed)))
+		state, _, err := engine.StartGame("SEED_SEARCH", players)
+		if err != nil {
+			t.Fatalf("StartGame returned error: %v", err)
+		}
+		if countCardsByCode(state.Players[0].Hand, seedSearchComboCard) >= seedSearchComboCardCount && len(state.Players[1].Hand) > 0 {
+			t.Logf("GAME_TEST_SEED=%d gives player 1 at least %d %s cards; player 2 has %d targetable cards", seed, seedSearchComboCardCount, seedSearchComboCard, len(state.Players[1].Hand))
+			return
+		}
+	}
+
+	t.Fatalf("no seed below %d gives player 1 at least %d %s cards with a targetable player 2", seedSearchMax, seedSearchComboCardCount, seedSearchComboCard)
 }
 
 func seedSearchHandContains(cards []Card, target CardCode) bool {

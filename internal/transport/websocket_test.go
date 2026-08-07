@@ -363,6 +363,109 @@ func TestWebSocketExplosivePlacementIsAuthorizedAndPrivate(t *testing.T) {
 	}
 }
 
+func TestWebSocketPlayComboAndDiscardRecoveryCommands(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, joinerSession := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	if _, err := manager.StartGameWithoutAuth(hostSession.RoomID); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	roomValue, exists := manager.GetRoom(hostSession.RoomID)
+	if !exists {
+		t.Fatal("room should exist")
+	}
+	state := roomValue.State()
+	hostIndex, joinerIndex := -1, -1
+	for i, player := range state.Players {
+		switch player.ID {
+		case hostSession.PlayerID:
+			hostIndex = i
+		case joinerSession.PlayerID:
+			joinerIndex = i
+		}
+	}
+	if hostIndex < 0 || joinerIndex < 0 {
+		t.Fatal("host and joiner should be in game state")
+	}
+	state.Phase = game.PhasePlayerTurn
+	state.CurrentPlayerID = hostSession.PlayerID
+	state.TurnDebt[hostSession.PlayerID] = 1
+	state.Players[hostIndex].Hand = []game.Card{{ID: "combo-1", Code: game.CardSkipTurn}, {ID: "combo-2", Code: game.CardSkipTurn}}
+	state.Players[joinerIndex].Hand = []game.Card{{ID: "target-secret-1", Code: game.CardShuffleDeck}}
+
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLAY_COMBO", RequestID: "bad-combo", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: json.RawMessage(`"bad"`)})
+	badComboResponse := readUntilServerEnvelope(t, hostConn, MessageCommandError)
+	var badComboError CommandErrorPayload
+	if err := json.Unmarshal(badComboResponse.Payload, &badComboError); err != nil {
+		t.Fatalf("Unmarshal combo payload error returned error: %v", err)
+	}
+	if badComboError.Code != "INVALID_PAYLOAD" {
+		t.Fatalf("combo payload error code got %s, want INVALID_PAYLOAD", badComboError.Code)
+	}
+
+	comboPayload, err := json.Marshal(PlayComboPayload{CardIDs: []string{"combo-1", "combo-2"}, TargetID: joinerSession.PlayerID})
+	if err != nil {
+		t.Fatalf("Marshal combo payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "PLAY_COMBO", RequestID: "play-combo", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: comboPayload})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	hostComboEvents := readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	if strings.Contains(string(hostComboEvents.Payload), "target-secret-1") {
+		t.Fatal("combo event must not reveal target hand card identity")
+	}
+	hostComboView := readUntilServerEnvelope(t, hostConn, MessageGameView)
+	var comboView game.PlayerGameView
+	if err := json.Unmarshal(hostComboView.Payload, &comboView); err != nil {
+		t.Fatalf("Unmarshal combo view returned error: %v", err)
+	}
+	if comboView.PendingAction == nil || comboView.PendingAction.ComboKind != game.ComboPair {
+		t.Fatalf("combo view pending action got %#v, want pair", comboView.PendingAction)
+	}
+
+	state.Phase = game.PhaseWaitingDiscardRecovery
+	state.PendingAction = &game.PendingAction{ID: "recovery-pending-1", SourcePlayerID: hostSession.PlayerID, Type: game.PendingDiscardRecovery}
+	state.DiscardPile = []game.Card{{ID: "recover-public-1", Code: game.CardPeekDeck}}
+
+	recoveryPayload, err := json.Marshal(ChooseCardFromDiscardPayload{CardID: "recover-public-1"})
+	if err != nil {
+		t.Fatalf("Marshal recovery payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_CARD_FROM_DISCARD", RequestID: "recover-as-other", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: recoveryPayload})
+	notSourceResponse := readUntilServerEnvelope(t, joinerConn, MessageCommandError)
+	var notSourceError CommandErrorPayload
+	if err := json.Unmarshal(notSourceResponse.Payload, &notSourceError); err != nil {
+		t.Fatalf("Unmarshal recovery authorization error returned error: %v", err)
+	}
+	if notSourceError.Code != "NOT_YOUR_TURN" {
+		t.Fatalf("recovery authorization code got %s, want NOT_YOUR_TURN", notSourceError.Code)
+	}
+
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_CARD_FROM_DISCARD", RequestID: "recover-card", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: recoveryPayload})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	hostRecoveryView := readUntilServerEnvelope(t, hostConn, MessageGameView)
+	var recoveryView game.PlayerGameView
+	if err := json.Unmarshal(hostRecoveryView.Payload, &recoveryView); err != nil {
+		t.Fatalf("Unmarshal recovery view returned error: %v", err)
+	}
+	foundRecovered := false
+	for _, card := range recoveryView.You.Hand {
+		if card.ID == "recover-public-1" {
+			foundRecovered = true
+		}
+	}
+	if !foundRecovered {
+		t.Fatalf("source hand got %#v, want recovered discard card", recoveryView.You.Hand)
+	}
+}
+
 func TestWebSocketPlayCancelUpdatesCancelWindow(t *testing.T) {
 	manager := room.NewManager()
 	server := httptest.NewServer(NewWebSocketHandler(manager, nil))

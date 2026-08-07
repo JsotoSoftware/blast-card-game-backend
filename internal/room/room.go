@@ -393,6 +393,34 @@ func (r *Room) PlayCancel(playerToken string, cardID string, pendingActionID str
 	return r.engine.PlayCancel(r.state, game.PlayCancelCommand{PlayerID: player.ID, CardID: cardID, PendingActionID: pendingActionID})
 }
 
+func (r *Room) PlayCombo(playerToken string, cardIDs []string, targetPlayerID string, requestedCode game.CardCode) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	player := r.playerByTokenLocked(playerToken)
+	if player == nil {
+		return nil, ErrInvalidPlayerToken
+	}
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.PlayCombo(r.state, game.PlayComboCommand{PlayerID: player.ID, CardIDs: cardIDs, TargetID: targetPlayerID, RequestedCode: requestedCode})
+}
+
+func (r *Room) ChooseCardFromDiscard(playerToken string, cardID string) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	player := r.playerByTokenLocked(playerToken)
+	if player == nil {
+		return nil, ErrInvalidPlayerToken
+	}
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.ChooseCardFromDiscard(r.state, game.ChooseCardFromDiscardCommand{PlayerID: player.ID, CardID: cardID})
+}
+
 func (r *Room) ExpireCancelWindow(now time.Time) ([]game.Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

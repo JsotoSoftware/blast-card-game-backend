@@ -8,7 +8,7 @@ import (
 
 const (
 	extraTurnDebt        = 2
-	cancelWindowDuration = 10 * time.Second
+	cancelWindowDuration = 5 * time.Second
 )
 
 type Engine struct {

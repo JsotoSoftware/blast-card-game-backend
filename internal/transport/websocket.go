@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	cancelWindowBroadcastDelay = 10100 * time.Millisecond
+	cancelWindowBroadcastDelay = 5100 * time.Millisecond
 
 	MessagePong             = "PONG"
 	MessageCommandAck       = "COMMAND_ACK"
@@ -137,6 +137,10 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, client *connectedC
 		return h.handleChooseCardForRequest(ctx, client, envelope)
 	case "PLAY_CANCEL":
 		return h.handlePlayCancel(ctx, client, envelope)
+	case "PLAY_COMBO":
+		return h.handlePlayCombo(ctx, client, envelope)
+	case "CHOOSE_CARD_FROM_DISCARD":
+		return h.handleChooseCardFromDiscard(ctx, client, envelope)
 	default:
 		return h.writeError(ctx, client, envelope.RequestID, "UNKNOWN_COMMAND", "Unknown command type.")
 	}
@@ -356,6 +360,24 @@ func (h *WebSocketHandler) handlePlayCard(ctx context.Context, client *connected
 	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
 }
 
+func (h *WebSocketHandler) handlePlayCombo(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
+	roomID, token, err := h.sessionForCommand(client, envelope)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	var payload PlayComboPayload
+	if err := decodePayload(envelope.Payload, &payload); err != nil || len(payload.CardIDs) == 0 {
+		return h.writeError(ctx, client, envelope.RequestID, "INVALID_PAYLOAD", "Invalid PLAY_COMBO payload.")
+	}
+
+	events, err := h.manager.PlayCombo(roomID, token, payload.CardIDs, payload.TargetID, payload.RequestedCode)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	h.scheduleCancelWindowExpiration(roomID)
+	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
+}
+
 func (h *WebSocketHandler) handlePlaceExplosive(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
 	roomID, token, err := h.sessionForCommand(client, envelope)
 	if err != nil {
@@ -384,6 +406,23 @@ func (h *WebSocketHandler) handleChooseCardForRequest(ctx context.Context, clien
 	}
 
 	events, err := h.manager.ChooseCardForRequest(roomID, token, payload.CardID)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
+}
+
+func (h *WebSocketHandler) handleChooseCardFromDiscard(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
+	roomID, token, err := h.sessionForCommand(client, envelope)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	var payload ChooseCardFromDiscardPayload
+	if err := decodePayload(envelope.Payload, &payload); err != nil || payload.CardID == "" {
+		return h.writeError(ctx, client, envelope.RequestID, "INVALID_PAYLOAD", "Invalid CHOOSE_CARD_FROM_DISCARD payload.")
+	}
+
+	events, err := h.manager.ChooseCardFromDiscard(roomID, token, payload.CardID)
 	if err != nil {
 		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
 	}

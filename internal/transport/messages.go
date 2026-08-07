@@ -1,6 +1,10 @@
 package transport
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"exploding-game/server/internal/game"
+)
 
 const ProtocolVersion = 1
 
@@ -64,6 +68,12 @@ type PlayCardPayload struct {
 	TargetID string   `json:"targetId,omitempty"`
 }
 
+type PlayComboPayload struct {
+	CardIDs       []string      `json:"cardIds"`
+	TargetID      string        `json:"targetId,omitempty"`
+	RequestedCode game.CardCode `json:"requestedCode,omitempty"`
+}
+
 type PlaceExplosivePayload struct {
 	Index *int `json:"index"`
 }
@@ -75,6 +85,10 @@ type ChooseCardForRequestPayload struct {
 type PlayCancelPayload struct {
 	CardID          string `json:"cardId,omitempty"`
 	PendingActionID string `json:"pendingActionId,omitempty"`
+}
+
+type ChooseCardFromDiscardPayload struct {
+	CardID string `json:"cardId"`
 }
 
 type CommandAckPayload struct {
