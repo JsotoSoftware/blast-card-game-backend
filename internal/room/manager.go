@@ -229,6 +229,14 @@ func (m *Manager) PlayCombo(roomID string, playerToken string, cardIDs []string,
 	return room.PlayCombo(playerToken, cardIDs, targetPlayerID, requestedCode)
 }
 
+func (m *Manager) ChooseCardForRecycle(roomID string, playerToken string, cardID string) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.ChooseCardForRecycle(playerToken, cardID)
+}
+
 func (m *Manager) ChooseCardFromDiscard(roomID string, playerToken string, cardID string) ([]game.Event, error) {
 	room, exists := m.GetRoom(roomID)
 	if !exists {

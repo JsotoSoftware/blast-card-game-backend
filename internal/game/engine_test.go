@@ -1,9 +1,11 @@
 package game
 
 import (
+	"encoding/json"
 	"errors"
 	"math/rand"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -179,6 +181,118 @@ func TestDrawSecondExplosiveWithHolderAndNoShieldEliminatesPlayer(t *testing.T) 
 	}
 	if state.WinnerPlayerID != "p2" {
 		t.Fatalf("winner got %s, want p2", state.WinnerPlayerID)
+	}
+}
+
+func TestPairComboStealingExplosiveHolderEliminatesTarget(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(1)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("explosive-1", CardExplosive), engineTestCard("holder-1", CardExplosiveHolder)}),
+		},
+		nil,
+		"p1",
+	)
+
+	if _, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2"}, TargetID: "p2"}); err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if state.Players[1].Alive || state.WinnerPlayerID != "p1" || state.Phase != PhaseGameOver {
+		t.Fatalf("holder loss should eliminate p2 and end the game, got %#v", state)
+	}
+	if countCode(state.DiscardPile, CardExplosive) != 1 || !hasEvent(events, EventPlayerEliminated) || !hasEvent(events, EventGameOver) {
+		t.Fatalf("unsafe explosive elimination got discard=%#v events=%#v", state.DiscardPile, events)
+	}
+}
+
+func TestTripleComboStealingExplosiveEliminatesRecipientWithoutHolder(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(42)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn), engineTestCard("skip-3", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("holder-1", CardExplosiveHolder), engineTestCard("explosive-1", CardExplosive)}),
+		},
+		nil,
+		"p1",
+	)
+
+	if _, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2", "skip-3"}, TargetID: "p2", RequestedCode: CardExplosive}); err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if state.Players[0].Alive || state.WinnerPlayerID != "p2" || state.Phase != PhaseGameOver {
+		t.Fatalf("unsafe explosive recipient should be eliminated, got %#v", state)
+	}
+	if !hasEvent(events, EventPlayerEliminated) || !hasEvent(events, EventGameOver) {
+		t.Fatalf("expected recipient elimination and game over, got %#v", events)
+	}
+}
+
+func TestUnsafeExplosiveEliminationAdvancesPastCurrentPlayer(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(43)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn), engineTestCard("skip-3", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("holder-1", CardExplosiveHolder), engineTestCard("explosive-1", CardExplosive)}),
+			engineTestPlayer("p3", nil),
+		},
+		nil,
+		"p1",
+	)
+
+	if _, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2", "skip-3"}, TargetID: "p2", RequestedCode: CardExplosive}); err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+
+	if state.Players[0].Alive || state.Phase != PhasePlayerTurn || state.CurrentPlayerID != "p2" {
+		t.Fatalf("current player elimination should advance to p2, got %#v", state)
+	}
+	if !hasEvent(events, EventPlayerEliminated) || !hasEvent(events, EventTurnStarted) {
+		t.Fatalf("expected elimination and next turn events, got %#v", events)
+	}
+}
+
+func TestRequestCardTransferOfExplosiveHolderEliminatesTarget(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(43)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("request-1", CardRequestCard)}),
+			engineTestPlayer("p2", []Card{engineTestCard("holder-1", CardExplosiveHolder), engineTestCard("explosive-1", CardExplosive)}),
+		},
+		nil,
+		"p1",
+	)
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"request-1"}, TargetID: "p2"}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(state); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	events, err := engine.ChooseCardForRequest(state, ChooseCardForRequestCommand{PlayerID: "p2", CardID: "holder-1"})
+	if err != nil {
+		t.Fatalf("ChooseCardForRequest returned error: %v", err)
+	}
+
+	if state.Players[1].Alive || state.WinnerPlayerID != "p1" || state.Phase != PhaseGameOver {
+		t.Fatalf("holder loss should eliminate p2 and end the game, got %#v", state)
+	}
+	if !hasEvent(events, EventPlayerEliminated) || !hasEvent(events, EventGameOver) {
+		t.Fatalf("expected target elimination and game over, got %#v", events)
 	}
 }
 
@@ -413,6 +527,122 @@ func TestRequestCardTargetChoosesAndTransfersCardPrivately(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Type != EventActionResolved || len(events[0].CardIDs) != 0 || events[0].TargetID != "p2" {
 		t.Fatalf("request resolution event got %#v, want public transfer without card identity", events)
+	}
+}
+
+func TestCollectiveRecycleWaitsForAllEligiblePlayers(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(44)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("recycle-1", CardCollectiveRecycle), engineTestCard("p1-card", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("p2-card", CardShuffleDeck)}),
+			engineTestPlayer("p3", nil),
+		},
+		[]Card{engineTestCard("draw-1", CardTokenA), engineTestCard("draw-2", CardTokenB)},
+		"p1",
+	)
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"recycle-1"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if state.Phase != PhaseWaitingRecycleChoices || state.PendingAction == nil || state.PendingAction.Type != PendingRecycleChoices {
+		t.Fatalf("collective recycle state got phase=%s pending=%#v", state.Phase, state.PendingAction)
+	}
+	if !reflect.DeepEqual(state.PendingAction.RecyclePlayerIDs, []string{"p1", "p2"}) {
+		t.Fatalf("recycle eligibility got %v, want p1 and p2", state.PendingAction.RecyclePlayerIDs)
+	}
+	for _, event := range events {
+		if event.Type == EventPrivatePromptSent && len(event.CardIDs) != 0 {
+			t.Fatalf("recycle prompt must not include card IDs: %#v", event)
+		}
+	}
+
+	if _, err := engine.ChooseCardForRecycle(state, ChooseCardForRecycleCommand{PlayerID: "p3", CardID: "missing"}); !errors.Is(err, ErrNotYourTurn) {
+		t.Fatalf("ineligible recycle choice error got %v, want ErrNotYourTurn", err)
+	}
+	if _, err := engine.ChooseCardForRecycle(state, ChooseCardForRecycleCommand{PlayerID: "p1", CardID: "p1-card"}); err != nil {
+		t.Fatalf("first recycle choice returned error: %v", err)
+	}
+	if len(state.DrawPile) != 2 || state.Phase != PhaseWaitingRecycleChoices {
+		t.Fatalf("first recycle choice should wait, got draw=%#v phase=%s", state.DrawPile, state.Phase)
+	}
+	if _, err := engine.ChooseCardForRecycle(state, ChooseCardForRecycleCommand{PlayerID: "p1", CardID: "p1-card"}); !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("duplicate recycle choice error got %v, want ErrInvalidCardPlay", err)
+	}
+
+	publicView, err := BuildViewForPlayer(state, "p3")
+	if err != nil {
+		t.Fatalf("BuildViewForPlayer returned error: %v", err)
+	}
+	publicPayload, err := json.Marshal(publicView)
+	if err != nil {
+		t.Fatalf("Marshal public view returned error: %v", err)
+	}
+	if strings.Contains(string(publicPayload), "p1-card") || strings.Contains(string(publicPayload), "p2-card") {
+		t.Fatalf("public recycle view leaked selected or selectable card IDs: %s", publicPayload)
+	}
+
+	events, err = engine.ChooseCardForRecycle(state, ChooseCardForRecycleCommand{PlayerID: "p2", CardID: "p2-card"})
+	if err != nil {
+		t.Fatalf("final recycle choice returned error: %v", err)
+	}
+	if state.Phase != PhasePlayerTurn || state.PendingAction != nil || len(state.DrawPile) != 4 {
+		t.Fatalf("completed recycle state got phase=%s pending=%#v draw=%#v", state.Phase, state.PendingAction, state.DrawPile)
+	}
+	if findCardIndexByID(state.DrawPile, "p1-card") < 0 || findCardIndexByID(state.DrawPile, "p2-card") < 0 {
+		t.Fatalf("recycled cards were not returned to draw pile: %#v", state.DrawPile)
+	}
+	if !hasEvent(events, EventActionResolved) {
+		t.Fatalf("completed recycle should emit action resolved, got %#v", events)
+	}
+}
+
+func TestCollectiveRecycleCanceledBeforeChoices(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(45)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("recycle-1", CardCollectiveRecycle), engineTestCard("p1-card", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("cancel-1", CardCancel), engineTestCard("p2-card", CardShuffleDeck)}),
+		},
+		nil,
+		"p1",
+	)
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"recycle-1"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.PlayCancel(state, PlayCancelCommand{PlayerID: "p2", CardID: "cancel-1"}); err != nil {
+		t.Fatalf("PlayCancel returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if state.Phase != PhasePlayerTurn || state.PendingAction != nil || !hasEvent(events, EventActionCanceled) {
+		t.Fatalf("canceled recycle state got phase=%s pending=%#v events=%#v", state.Phase, state.PendingAction, events)
+	}
+}
+
+func TestCollectiveRecycleWithNoEligiblePlayersResolvesImmediately(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(46)))
+	state := engineTestState(
+		[]Player{engineTestPlayer("p1", []Card{engineTestCard("recycle-1", CardCollectiveRecycle)}), engineTestPlayer("p2", nil)},
+		[]Card{engineTestCard("draw-1", CardSkipTurn)},
+		"p1",
+	)
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"recycle-1"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(state); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if state.Phase != PhasePlayerTurn || state.PendingAction != nil {
+		t.Fatalf("zero-eligible recycle state got phase=%s pending=%#v", state.Phase, state.PendingAction)
 	}
 }
 

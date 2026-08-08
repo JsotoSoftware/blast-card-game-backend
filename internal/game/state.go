@@ -55,14 +55,16 @@ const (
 )
 
 type PendingAction struct {
-	ID              string            `json:"id"`
-	SourcePlayerID  string            `json:"sourcePlayerId"`
-	Type            PendingActionType `json:"type"`
-	CardIDs         []string          `json:"cardIds"`
-	Cards           []Card            `json:"-"`
-	TargetPlayerID  string            `json:"targetPlayerId,omitempty"`
-	ComboKind       ComboKind         `json:"comboKind,omitempty"`
-	RequestedCode   CardCode          `json:"requestedCode,omitempty"`
-	CancelCount     int               `json:"cancelCount"`
-	ExpiresAtUnixMs int64             `json:"expiresAtUnixMs"`
+	ID                string            `json:"id"`
+	SourcePlayerID    string            `json:"sourcePlayerId"`
+	Type              PendingActionType `json:"type"`
+	CardIDs           []string          `json:"cardIds"`
+	Cards             []Card            `json:"-"`
+	TargetPlayerID    string            `json:"targetPlayerId,omitempty"`
+	ComboKind         ComboKind         `json:"comboKind,omitempty"`
+	RequestedCode     CardCode          `json:"requestedCode,omitempty"`
+	CancelCount       int               `json:"cancelCount"`
+	ExpiresAtUnixMs   int64             `json:"expiresAtUnixMs"`
+	RecyclePlayerIDs  []string          `json:"-"`
+	RecycleSelections map[string]Card   `json:"-"`
 }

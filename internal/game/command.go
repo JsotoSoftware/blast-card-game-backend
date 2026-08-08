@@ -72,3 +72,8 @@ type ChooseCardFromDiscardCommand struct {
 	PlayerID string `json:"playerId"`
 	CardID   string `json:"cardId"`
 }
+
+type ChooseCardForRecycleCommand struct {
+	PlayerID string `json:"playerId"`
+	CardID   string `json:"cardId"`
+}

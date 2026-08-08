@@ -91,6 +91,10 @@ type ChooseCardFromDiscardPayload struct {
 	CardID string `json:"cardId"`
 }
 
+type ChooseCardForRecyclePayload struct {
+	CardID string `json:"cardId"`
+}
+
 type CommandAckPayload struct {
 	RequestID string `json:"requestId,omitempty"`
 }

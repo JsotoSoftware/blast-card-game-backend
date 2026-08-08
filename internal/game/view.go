@@ -207,8 +207,21 @@ func buildAvailableActions(state *GameState, player Player) []CommandType {
 		if state.PendingAction != nil && state.PendingAction.SourcePlayerID == player.ID {
 			actions = append(actions, CommandChooseCardFromDiscard)
 		}
+	case PhaseWaitingRecycleChoices:
+		if state.PendingAction != nil && containsPlayerID(state.PendingAction.RecyclePlayerIDs, player.ID) && state.PendingAction.RecycleSelections[player.ID].ID == "" {
+			actions = append(actions, CommandChooseCardForRecycle)
+		}
 	}
 	return actions
+}
+
+func containsPlayerID(playerIDs []string, playerID string) bool {
+	for _, id := range playerIDs {
+		if id == playerID {
+			return true
+		}
+	}
+	return false
 }
 
 func hasPlayableAction(cards []Card) bool {

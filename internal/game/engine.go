@@ -364,7 +364,51 @@ func (e *Engine) ChooseCardForRequest(state *GameState, cmd ChooseCardForRequest
 	state.PendingAction = nil
 	state.Phase = PhasePlayerTurn
 
-	return []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, nil, pending.TargetPlayerID)}, nil
+	events := []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, nil, pending.TargetPlayerID)}
+	events = append(events, e.resolveUnsafeExplosives(state, cmd.PlayerID, pending.SourcePlayerID)...)
+	return events, nil
+}
+
+func (e *Engine) ChooseCardForRecycle(state *GameState, cmd ChooseCardForRecycleCommand) ([]Event, error) {
+	if state.Phase != PhaseWaitingRecycleChoices {
+		return nil, ErrInvalidPhase
+	}
+	pending := state.PendingAction
+	if pending == nil || pending.Type != PendingRecycleChoices {
+		return nil, ErrNoPendingAction
+	}
+	if !containsPlayerID(pending.RecyclePlayerIDs, cmd.PlayerID) {
+		return nil, ErrNotYourTurn
+	}
+	if _, selected := pending.RecycleSelections[cmd.PlayerID]; selected {
+		return nil, ErrInvalidCardPlay
+	}
+
+	playerIndex, player, err := currentAlivePlayer(state, cmd.PlayerID)
+	if err != nil {
+		return nil, err
+	}
+	cardIndex := findCardIndexByID(player.Hand, cmd.CardID)
+	if cardIndex < 0 {
+		return nil, ErrCardNotInHand
+	}
+
+	pending.RecycleSelections[cmd.PlayerID] = player.Hand[cardIndex]
+	state.Players[playerIndex].Hand = removeCardAt(player.Hand, cardIndex)
+	if len(pending.RecycleSelections) != len(pending.RecyclePlayerIDs) {
+		return nil, nil
+	}
+
+	for _, playerID := range pending.RecyclePlayerIDs {
+		state.DrawPile = append(state.DrawPile, pending.RecycleSelections[playerID])
+	}
+	e.deckFactory.Shuffle(state.DrawPile)
+	state.PendingAction = nil
+	state.Phase = PhasePlayerTurn
+
+	events := []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, nil, "")}
+	events = append(events, e.resolveUnsafeExplosives(state, pending.RecyclePlayerIDs...)...)
+	return events, nil
 }
 
 func (e *Engine) ChooseCardFromDiscard(state *GameState, cmd ChooseCardFromDiscardCommand) ([]Event, error) {
@@ -439,6 +483,24 @@ func (e *Engine) resolvePlayedCard(state *GameState, card Card, sourcePlayerID s
 			TargetPlayerID: targetPlayerID,
 		}
 		events = append(events, e.nextEvent(state, EventPrivatePromptSent, targetPlayerID, []string{card.ID}, targetPlayerID))
+	case CardCollectiveRecycle:
+		recyclePlayerIDs := recycleEligiblePlayerIDs(state)
+		if len(recyclePlayerIDs) == 0 {
+			e.deckFactory.Shuffle(state.DrawPile)
+			return events, nil
+		}
+		state.Phase = PhaseWaitingRecycleChoices
+		state.PendingAction = &PendingAction{
+			ID:                e.nextPendingID(),
+			SourcePlayerID:    sourcePlayerID,
+			Type:              PendingRecycleChoices,
+			CardIDs:           []string{card.ID},
+			RecyclePlayerIDs:  recyclePlayerIDs,
+			RecycleSelections: make(map[string]Card, len(recyclePlayerIDs)),
+		}
+		for _, playerID := range recyclePlayerIDs {
+			events = append(events, e.nextEvent(state, EventPrivatePromptSent, playerID, nil, ""))
+		}
 	default:
 		return nil, ErrInvalidCardPlay
 	}
@@ -454,12 +516,17 @@ func (e *Engine) resolveCombo(state *GameState, pending *PendingAction) ([]Event
 		if err := e.transferRandomCard(state, pending.TargetPlayerID, pending.SourcePlayerID); err != nil {
 			return nil, err
 		}
+		events = append(events, e.resolveUnsafeExplosives(state, pending.TargetPlayerID, pending.SourcePlayerID)...)
 	case ComboTriple:
 		if pending.RequestedCode == "" {
 			return nil, ErrInvalidCardPlay
 		}
-		if err := transferFirstCardByCode(state, pending.TargetPlayerID, pending.SourcePlayerID, pending.RequestedCode); err != nil {
+		transferred, err := transferFirstCardByCode(state, pending.TargetPlayerID, pending.SourcePlayerID, pending.RequestedCode)
+		if err != nil {
 			return nil, err
+		}
+		if transferred {
+			events = append(events, e.resolveUnsafeExplosives(state, pending.TargetPlayerID, pending.SourcePlayerID)...)
 		}
 	case ComboFiveDifferent:
 		state.Phase = PhaseWaitingDiscardRecovery
@@ -499,25 +566,51 @@ func (e *Engine) transferRandomCard(state *GameState, fromPlayerID string, toPla
 	return nil
 }
 
-func transferFirstCardByCode(state *GameState, fromPlayerID string, toPlayerID string, code CardCode) error {
+func transferFirstCardByCode(state *GameState, fromPlayerID string, toPlayerID string, code CardCode) (bool, error) {
 	fromIndex, fromPlayer, err := currentAlivePlayer(state, fromPlayerID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	toIndex, _, err := currentAlivePlayer(state, toPlayerID)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	cardIndex := findCardIndexByCode(fromPlayer.Hand, code)
 	if cardIndex < 0 {
-		return nil
+		return false, nil
 	}
 
 	card := fromPlayer.Hand[cardIndex]
 	state.Players[fromIndex].Hand = removeCardAt(fromPlayer.Hand, cardIndex)
 	state.Players[toIndex].Hand = append(state.Players[toIndex].Hand, card)
-	return nil
+	return true, nil
+}
+
+func (e *Engine) resolveUnsafeExplosives(state *GameState, playerIDs ...string) []Event {
+	events := make([]Event, 0, len(playerIDs))
+	for _, playerID := range playerIDs {
+		playerIndex := findPlayerIndexByID(state, playerID)
+		if playerIndex < 0 || !state.Players[playerIndex].Alive {
+			continue
+		}
+
+		player := state.Players[playerIndex]
+		if countCardsByCode(player.Hand, CardExplosive) == 0 || findCardIndexByCode(player.Hand, CardExplosiveHolder) >= 0 {
+			continue
+		}
+
+		state.DiscardPile = append(state.DiscardPile, player.Hand...)
+		state.Players[playerIndex].Hand = nil
+		state.Players[playerIndex].Alive = false
+		events = append(events, e.nextEvent(state, EventPlayerEliminated, playerID, nil, ""))
+		if e.setWinnerIfGameOver(state) {
+			events = append(events, e.nextEvent(state, EventGameOver, state.WinnerPlayerID, nil, ""))
+		} else if state.CurrentPlayerID == playerID {
+			events = append(events, e.advanceToNextAlivePlayer(state)...)
+		}
+	}
+	return events
 }
 
 func (e *Engine) completeCurrentTurnUnit(state *GameState) []Event {
@@ -592,7 +685,8 @@ func isSupportedBasicAction(code CardCode) bool {
 		CardShuffleDeck,
 		CardPeekDeck,
 		CardPeekDeck5,
-		CardRequestCard:
+		CardRequestCard,
+		CardCollectiveRecycle:
 		return true
 	default:
 		return false
@@ -738,6 +832,16 @@ func removeCardsByIDs(cards []Card, cardIDs []string) []Card {
 		}
 	}
 	return result
+}
+
+func recycleEligiblePlayerIDs(state *GameState) []string {
+	playerIDs := make([]string, 0, len(state.Players))
+	for _, player := range state.Players {
+		if player.Alive && len(player.Hand) > 0 {
+			playerIDs = append(playerIDs, player.ID)
+		}
+	}
+	return playerIDs
 }
 
 func currentAlivePlayer(state *GameState, playerID string) (int, Player, error) {

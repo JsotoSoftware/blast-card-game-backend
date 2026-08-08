@@ -630,6 +630,83 @@ func TestWebSocketRequestCardChoiceTransfersWithoutPublicCardIdentity(t *testing
 	}
 }
 
+func TestWebSocketRecycleChoiceRequiresEligiblePlayerAndKeepsCardPrivate(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, joinerSession := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	if _, err := manager.StartGameWithoutAuth(hostSession.RoomID); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	roomValue, exists := manager.GetRoom(hostSession.RoomID)
+	if !exists {
+		t.Fatal("room should exist")
+	}
+	state := roomValue.State()
+	hostIndex, joinerIndex := -1, -1
+	for i, player := range state.Players {
+		switch player.ID {
+		case hostSession.PlayerID:
+			hostIndex = i
+		case joinerSession.PlayerID:
+			joinerIndex = i
+		}
+	}
+	if hostIndex < 0 || joinerIndex < 0 {
+		t.Fatal("host and joiner should be in game state")
+	}
+	state.Phase = game.PhaseWaitingRecycleChoices
+	state.CurrentPlayerID = hostSession.PlayerID
+	state.PendingAction = &game.PendingAction{
+		ID:                "recycle-pending-1",
+		SourcePlayerID:    hostSession.PlayerID,
+		Type:              game.PendingRecycleChoices,
+		RecyclePlayerIDs:  []string{joinerSession.PlayerID},
+		RecycleSelections: map[string]game.Card{},
+	}
+	state.Players[hostIndex].Hand = nil
+	state.Players[joinerIndex].Hand = []game.Card{{ID: "recycle-secret-1", Code: game.CardSkipTurn}}
+
+	payload, err := json.Marshal(ChooseCardForRecyclePayload{CardID: "recycle-secret-1"})
+	if err != nil {
+		t.Fatalf("Marshal recycle payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_CARD_FOR_RECYCLE", RequestID: "recycle-as-host", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: payload})
+	notEligibleResponse := readUntilServerEnvelope(t, hostConn, MessageCommandError)
+	var notEligibleError CommandErrorPayload
+	if err := json.Unmarshal(notEligibleResponse.Payload, &notEligibleError); err != nil {
+		t.Fatalf("Unmarshal recycle eligibility error returned error: %v", err)
+	}
+	if notEligibleError.Code != "NOT_YOUR_TURN" {
+		t.Fatalf("recycle eligibility error got %s, want NOT_YOUR_TURN", notEligibleError.Code)
+	}
+
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_CARD_FOR_RECYCLE", RequestID: "recycle-without-card", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: json.RawMessage(`{}`)})
+	missingCardResponse := readUntilServerEnvelope(t, joinerConn, MessageCommandError)
+	var missingCardError CommandErrorPayload
+	if err := json.Unmarshal(missingCardResponse.Payload, &missingCardError); err != nil {
+		t.Fatalf("Unmarshal missing recycle card error returned error: %v", err)
+	}
+	if missingCardError.Code != "INVALID_PAYLOAD" {
+		t.Fatalf("missing recycle card error got %s, want INVALID_PAYLOAD", missingCardError.Code)
+	}
+
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_CARD_FOR_RECYCLE", RequestID: "recycle-card", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: payload})
+	readUntilServerEnvelope(t, joinerConn, MessageCommandAck)
+	readUntilServerEnvelope(t, joinerConn, MessageGameEvents)
+	readUntilServerEnvelope(t, joinerConn, MessageGameView)
+	hostEvents := readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	if strings.Contains(string(hostEvents.Payload), "recycle-secret-1") || strings.Contains(string(hostEvents.Payload), string(game.CardSkipTurn)) {
+		t.Fatal("collective recycle event must not reveal the selected card")
+	}
+}
+
 func TestWebSocketTransferHost(t *testing.T) {
 	manager := room.NewManager()
 	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
