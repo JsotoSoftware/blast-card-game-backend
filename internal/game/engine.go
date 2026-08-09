@@ -120,12 +120,18 @@ func (e *Engine) PlaceExplosive(state *GameState, cmd PlaceExplosiveCommand) ([]
 		return nil, ErrNoPendingAction
 	}
 
-	card := state.PendingAction.Cards[0]
+	pending := state.PendingAction
+	card := pending.Cards[0]
 	state.DrawPile = insertCardAt(state.DrawPile, card, cmd.Index)
 	state.PendingAction = nil
 	state.Phase = PhasePlayerTurn
 
 	events := []Event{e.nextEvent(state, EventActionResolved, cmd.PlayerID, []string{card.ID}, "")}
+	if pending.ReactiveExplosive {
+		events = append(events, e.resolveUnsafeExplosivesFrom(state, pending.OriginalCurrentPlayerID, pending.SourcePlayerID)...)
+		return events, nil
+	}
+
 	events = append(events, e.completeCurrentTurnUnit(state)...)
 	return events, nil
 }
@@ -437,7 +443,9 @@ func (e *Engine) ChooseCardFromDiscard(state *GameState, cmd ChooseCardFromDisca
 	state.PendingAction = nil
 	state.Phase = PhasePlayerTurn
 
-	return []Event{e.nextEvent(state, EventActionResolved, cmd.PlayerID, []string{card.ID}, "")}, nil
+	events := []Event{e.nextEvent(state, EventActionResolved, cmd.PlayerID, []string{card.ID}, "")}
+	events = append(events, e.resolveUnsafeExplosives(state, cmd.PlayerID)...)
+	return events, nil
 }
 
 func (e *Engine) resolvePlayedCard(state *GameState, card Card, sourcePlayerID string, targetPlayerID string) ([]Event, error) {
@@ -588,29 +596,89 @@ func transferFirstCardByCode(state *GameState, fromPlayerID string, toPlayerID s
 }
 
 func (e *Engine) resolveUnsafeExplosives(state *GameState, playerIDs ...string) []Event {
+	return e.resolveUnsafeExplosivesFrom(state, state.CurrentPlayerID, playerIDs...)
+}
+
+func (e *Engine) resolveUnsafeExplosivesFrom(state *GameState, originalCurrentPlayerID string, playerIDs ...string) []Event {
 	events := make([]Event, 0, len(playerIDs))
+	seen := make(map[string]bool, len(playerIDs))
 	for _, playerID := range playerIDs {
+		if seen[playerID] {
+			continue
+		}
+		seen[playerID] = true
+
 		playerIndex := findPlayerIndexByID(state, playerID)
 		if playerIndex < 0 || !state.Players[playerIndex].Alive {
 			continue
 		}
 
 		player := state.Players[playerIndex]
-		if countCardsByCode(player.Hand, CardExplosive) == 0 || findCardIndexByCode(player.Hand, CardExplosiveHolder) >= 0 {
+		unsafeExplosiveCount := countCardsByCode(player.Hand, CardExplosive)
+		if findCardIndexByCode(player.Hand, CardExplosiveHolder) >= 0 && unsafeExplosiveCount > 0 {
+			unsafeExplosiveCount--
+		}
+		if unsafeExplosiveCount == 0 {
+			continue
+		}
+		shieldIndex := findCardIndexByCode(player.Hand, CardShield)
+		if shieldIndex < 0 {
+			state.DiscardPile = append(state.DiscardPile, player.Hand...)
+			state.Players[playerIndex].Hand = nil
+			state.Players[playerIndex].Alive = false
+			events = append(events, e.nextEvent(state, EventPlayerEliminated, playerID, nil, ""))
 			continue
 		}
 
-		state.DiscardPile = append(state.DiscardPile, player.Hand...)
-		state.Players[playerIndex].Hand = nil
-		state.Players[playerIndex].Alive = false
-		events = append(events, e.nextEvent(state, EventPlayerEliminated, playerID, nil, ""))
-		if e.setWinnerIfGameOver(state) {
-			events = append(events, e.nextEvent(state, EventGameOver, state.WinnerPlayerID, nil, ""))
-		} else if state.CurrentPlayerID == playerID {
-			events = append(events, e.advanceToNextAlivePlayer(state)...)
+		explosiveIndex := findCardIndexByCode(player.Hand, CardExplosive)
+		explosive := player.Hand[explosiveIndex]
+		shield := player.Hand[shieldIndex]
+		hand := removeCardAt(player.Hand, shieldIndex)
+		if explosiveIndex > shieldIndex {
+			explosiveIndex--
 		}
+		state.Players[playerIndex].Hand = removeCardAt(hand, explosiveIndex)
+		state.DiscardPile = append(state.DiscardPile, shield)
+		state.UnsafeExplosiveQueue = append(state.UnsafeExplosiveQueue, UnsafeExplosivePlacement{PlayerID: playerID, Card: explosive})
 	}
-	return events
+
+	if len(state.UnsafeExplosiveQueue) > 0 {
+		events = append(events, e.startNextUnsafeExplosivePlacement(state, originalCurrentPlayerID)...)
+		return events
+	}
+	return append(events, e.finishUnsafeExplosiveResolution(state, originalCurrentPlayerID)...)
+}
+
+func (e *Engine) startNextUnsafeExplosivePlacement(state *GameState, originalCurrentPlayerID string) []Event {
+	placement := state.UnsafeExplosiveQueue[0]
+	state.UnsafeExplosiveQueue = state.UnsafeExplosiveQueue[1:]
+	state.Phase = PhaseWaitingExplosivePlacement
+	state.PendingAction = &PendingAction{
+		ID:                      e.nextPendingID(),
+		SourcePlayerID:          placement.PlayerID,
+		Type:                    PendingExplosivePlacement,
+		CardIDs:                 []string{placement.Card.ID},
+		Cards:                   []Card{placement.Card},
+		ReactiveExplosive:       true,
+		OriginalCurrentPlayerID: originalCurrentPlayerID,
+	}
+	return []Event{e.nextEvent(state, EventActionPending, placement.PlayerID, []string{placement.Card.ID}, "")}
+}
+
+func (e *Engine) finishUnsafeExplosiveResolution(state *GameState, originalCurrentPlayerID string) []Event {
+	if e.setWinnerIfGameOver(state) {
+		return []Event{e.nextEvent(state, EventGameOver, state.WinnerPlayerID, nil, "")}
+	}
+
+	originalIndex := findPlayerIndexByID(state, originalCurrentPlayerID)
+	if originalIndex >= 0 && state.Players[originalIndex].Alive {
+		state.CurrentPlayerID = originalCurrentPlayerID
+		state.Phase = PhasePlayerTurn
+		return nil
+	}
+
+	state.CurrentPlayerID = originalCurrentPlayerID
+	return e.advanceToNextAlivePlayer(state)
 }
 
 func (e *Engine) completeCurrentTurnUnit(state *GameState) []Event {

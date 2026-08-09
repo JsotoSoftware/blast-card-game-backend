@@ -13,23 +13,29 @@ type Player struct {
 }
 
 type GameState struct {
-	RoomID          string                `json:"roomId"`
-	Phase           GamePhase             `json:"phase"`
-	Players         []Player              `json:"players"`
-	DrawPile        []Card                `json:"drawPile"`
-	DiscardPile     []Card                `json:"discardPile"`
-	CurrentPlayerID string                `json:"currentPlayerId"`
-	TurnDebt        map[string]int        `json:"turnDebt"`
-	PendingAction   *PendingAction        `json:"pendingAction,omitempty"`
-	MarkedCards     map[string]MarkedCard `json:"markedCards"`
-	WinnerPlayerID  string                `json:"winnerPlayerId,omitempty"`
-	EventSeq        int64                 `json:"eventSeq"`
+	RoomID               string                     `json:"roomId"`
+	Phase                GamePhase                  `json:"phase"`
+	Players              []Player                   `json:"players"`
+	DrawPile             []Card                     `json:"drawPile"`
+	DiscardPile          []Card                     `json:"discardPile"`
+	CurrentPlayerID      string                     `json:"currentPlayerId"`
+	TurnDebt             map[string]int             `json:"turnDebt"`
+	PendingAction        *PendingAction             `json:"pendingAction,omitempty"`
+	MarkedCards          map[string]MarkedCard      `json:"markedCards"`
+	WinnerPlayerID       string                     `json:"winnerPlayerId,omitempty"`
+	EventSeq             int64                      `json:"eventSeq"`
+	UnsafeExplosiveQueue []UnsafeExplosivePlacement `json:"-"`
 }
 
 type MarkedCard struct {
 	CardID   string `json:"cardId"`
 	OwnerID  string `json:"ownerId"`
 	Revealed Card   `json:"revealed"`
+}
+
+type UnsafeExplosivePlacement struct {
+	PlayerID string
+	Card     Card
 }
 
 type PendingActionType string
@@ -55,16 +61,18 @@ const (
 )
 
 type PendingAction struct {
-	ID                string            `json:"id"`
-	SourcePlayerID    string            `json:"sourcePlayerId"`
-	Type              PendingActionType `json:"type"`
-	CardIDs           []string          `json:"cardIds"`
-	Cards             []Card            `json:"-"`
-	TargetPlayerID    string            `json:"targetPlayerId,omitempty"`
-	ComboKind         ComboKind         `json:"comboKind,omitempty"`
-	RequestedCode     CardCode          `json:"requestedCode,omitempty"`
-	CancelCount       int               `json:"cancelCount"`
-	ExpiresAtUnixMs   int64             `json:"expiresAtUnixMs"`
-	RecyclePlayerIDs  []string          `json:"-"`
-	RecycleSelections map[string]Card   `json:"-"`
+	ID                      string            `json:"id"`
+	SourcePlayerID          string            `json:"sourcePlayerId"`
+	Type                    PendingActionType `json:"type"`
+	CardIDs                 []string          `json:"cardIds"`
+	Cards                   []Card            `json:"-"`
+	TargetPlayerID          string            `json:"targetPlayerId,omitempty"`
+	ComboKind               ComboKind         `json:"comboKind,omitempty"`
+	RequestedCode           CardCode          `json:"requestedCode,omitempty"`
+	CancelCount             int               `json:"cancelCount"`
+	ExpiresAtUnixMs         int64             `json:"expiresAtUnixMs"`
+	RecyclePlayerIDs        []string          `json:"-"`
+	RecycleSelections       map[string]Card   `json:"-"`
+	ReactiveExplosive       bool              `json:"-"`
+	OriginalCurrentPlayerID string            `json:"-"`
 }

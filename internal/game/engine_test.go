@@ -296,6 +296,188 @@ func TestRequestCardTransferOfExplosiveHolderEliminatesTarget(t *testing.T) {
 	}
 }
 
+func TestHolderLossWithShieldRequiresExplosivePlacement(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(44)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn), engineTestCard("skip-3", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("holder-1", CardExplosiveHolder), engineTestCard("explosive-1", CardExplosive), engineTestCard("shield-1", CardShield)}),
+		},
+		nil,
+		"p1",
+	)
+
+	if _, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2", "skip-3"}, TargetID: "p2", RequestedCode: CardExplosiveHolder}); err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if !state.Players[1].Alive || state.Phase != PhaseWaitingExplosivePlacement || state.PendingAction == nil || state.PendingAction.SourcePlayerID != "p2" {
+		t.Fatalf("shielded holder loss should require placement, got %#v", state)
+	}
+	if countCode(state.Players[1].Hand, CardExplosive) != 0 || countCode(state.DiscardPile, CardShield) != 1 || !hasEvent(events, EventActionPending) {
+		t.Fatalf("shielded holder loss state got hand=%#v discard=%#v events=%#v", state.Players[1].Hand, state.DiscardPile, events)
+	}
+	if _, err := engine.PlaceExplosive(state, PlaceExplosiveCommand{PlayerID: "p2", Index: 0}); err != nil {
+		t.Fatalf("PlaceExplosive returned error: %v", err)
+	}
+	if state.Phase != PhasePlayerTurn || state.CurrentPlayerID != "p1" {
+		t.Fatalf("reactive placement should resume p1's turn, got %#v", state)
+	}
+}
+
+func TestTransferredExplosiveWithShieldRequiresPlacement(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(45)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("skip-1", CardSkipTurn), engineTestCard("skip-2", CardSkipTurn), engineTestCard("skip-3", CardSkipTurn), engineTestCard("shield-1", CardShield)}),
+			engineTestPlayer("p2", []Card{engineTestCard("holder-1", CardExplosiveHolder), engineTestCard("explosive-1", CardExplosive)}),
+		},
+		nil,
+		"p1",
+	)
+
+	if _, err := engine.PlayCombo(state, PlayComboCommand{PlayerID: "p1", CardIDs: []string{"skip-1", "skip-2", "skip-3"}, TargetID: "p2", RequestedCode: CardExplosive}); err != nil {
+		t.Fatalf("PlayCombo returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(state); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if !state.Players[0].Alive || state.Phase != PhaseWaitingExplosivePlacement || state.PendingAction == nil || state.PendingAction.SourcePlayerID != "p1" {
+		t.Fatalf("shielded explosive recipient should require placement, got %#v", state)
+	}
+}
+
+func TestDiscardRecoveryOfExplosiveWithShieldRequiresPlacement(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(46)))
+	state := engineTestState(
+		[]Player{engineTestPlayer("p1", []Card{engineTestCard("shield-1", CardShield)}), engineTestPlayer("p2", nil)},
+		[]Card{engineTestCard("draw-1", CardSkipTurn)},
+		"p1",
+	)
+	state.Phase = PhaseWaitingDiscardRecovery
+	state.PendingAction = &PendingAction{ID: "recovery-1", SourcePlayerID: "p1", Type: PendingDiscardRecovery}
+	state.DiscardPile = []Card{engineTestCard("explosive-1", CardExplosive)}
+
+	if _, err := engine.ChooseCardFromDiscard(state, ChooseCardFromDiscardCommand{PlayerID: "p1", CardID: "explosive-1"}); err != nil {
+		t.Fatalf("ChooseCardFromDiscard returned error: %v", err)
+	}
+	if !state.Players[0].Alive || state.Phase != PhaseWaitingExplosivePlacement || state.PendingAction == nil || state.PendingAction.SourcePlayerID != "p1" {
+		t.Fatalf("shielded explosive recovery should require placement, got %#v", state)
+	}
+	if countCode(state.DiscardPile, CardShield) != 1 {
+		t.Fatalf("recovery shield should be discarded, got %#v", state.DiscardPile)
+	}
+}
+
+func TestMultipleUnsafeExplosivesUseShieldsBeforeElimination(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(47)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("explosive-1", CardExplosive), engineTestCard("explosive-2", CardExplosive), engineTestCard("shield-1", CardShield)}),
+			engineTestPlayer("p2", nil),
+		},
+		nil,
+		"p1",
+	)
+
+	engine.resolveUnsafeExplosives(state, "p1")
+	if !state.Players[0].Alive || state.Phase != PhaseWaitingExplosivePlacement {
+		t.Fatalf("first shield should allow the first explosive placement, got %#v", state)
+	}
+	if _, err := engine.PlaceExplosive(state, PlaceExplosiveCommand{PlayerID: "p1", Index: 0}); err != nil {
+		t.Fatalf("PlaceExplosive returned error: %v", err)
+	}
+	if state.Players[0].Alive || state.Phase != PhaseGameOver || state.WinnerPlayerID != "p2" {
+		t.Fatalf("player should be eliminated only after the remaining unshielded explosive, got %#v", state)
+	}
+}
+
+func TestMultipleUnsafeExplosivesWithShieldsRequireSerialPlacements(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(47)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("explosive-1", CardExplosive), engineTestCard("explosive-2", CardExplosive), engineTestCard("shield-1", CardShield), engineTestCard("shield-2", CardShield)}),
+			engineTestPlayer("p2", nil),
+		},
+		nil,
+		"p1",
+	)
+
+	engine.resolveUnsafeExplosives(state, "p1")
+	if state.Phase != PhaseWaitingExplosivePlacement || state.PendingAction == nil {
+		t.Fatalf("multiple unsafe explosives should start a placement, got %#v", state)
+	}
+	if _, err := engine.PlaceExplosive(state, PlaceExplosiveCommand{PlayerID: "p1", Index: 0}); err != nil {
+		t.Fatalf("first PlaceExplosive returned error: %v", err)
+	}
+	if state.Phase != PhaseWaitingExplosivePlacement || state.PendingAction == nil || state.PendingAction.SourcePlayerID != "p1" {
+		t.Fatalf("second explosive should require placement, got %#v", state)
+	}
+	if _, err := engine.PlaceExplosive(state, PlaceExplosiveCommand{PlayerID: "p1", Index: 0}); err != nil {
+		t.Fatalf("second PlaceExplosive returned error: %v", err)
+	}
+	if !state.Players[0].Alive || state.Phase != PhasePlayerTurn || countCode(state.DiscardPile, CardShield) != 2 {
+		t.Fatalf("shielded multiple explosives should survive after placement, got %#v", state)
+	}
+}
+
+func TestUnsafeExplosivePlacementsAreQueuedAndResumeOriginalTurn(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(47)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("p1-explosive", CardExplosive), engineTestCard("p1-shield", CardShield)}),
+			engineTestPlayer("p2", []Card{engineTestCard("p2-explosive", CardExplosive), engineTestCard("p2-shield", CardShield)}),
+			engineTestPlayer("p3", nil),
+		},
+		nil,
+		"p1",
+	)
+
+	engine.resolveUnsafeExplosives(state, "p1", "p2")
+	if state.Phase != PhaseWaitingExplosivePlacement || state.PendingAction.SourcePlayerID != "p1" || len(state.UnsafeExplosiveQueue) != 1 {
+		t.Fatalf("first unsafe placement got %#v", state)
+	}
+	if _, err := engine.PlaceExplosive(state, PlaceExplosiveCommand{PlayerID: "p1", Index: 0}); err != nil {
+		t.Fatalf("first PlaceExplosive returned error: %v", err)
+	}
+	if state.Phase != PhaseWaitingExplosivePlacement || state.PendingAction.SourcePlayerID != "p2" {
+		t.Fatalf("second unsafe placement was not queued, got %#v", state)
+	}
+	if _, err := engine.PlaceExplosive(state, PlaceExplosiveCommand{PlayerID: "p2", Index: 0}); err != nil {
+		t.Fatalf("second PlaceExplosive returned error: %v", err)
+	}
+	if state.Phase != PhasePlayerTurn || state.CurrentPlayerID != "p1" {
+		t.Fatalf("queued placements should resume p1, got %#v", state)
+	}
+}
+
+func TestUnsafeExplosiveQueueAdvancesFromEliminatedOriginalPlayer(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(48)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("p1-explosive", CardExplosive)}),
+			engineTestPlayer("p2", []Card{engineTestCard("p2-explosive", CardExplosive), engineTestCard("p2-shield", CardShield)}),
+			engineTestPlayer("p3", nil),
+		},
+		nil,
+		"p1",
+	)
+
+	events := engine.resolveUnsafeExplosives(state, "p1", "p2")
+	if state.Players[0].Alive || state.Phase != PhaseWaitingExplosivePlacement || state.PendingAction.SourcePlayerID != "p2" || hasEvent(events, EventGameOver) {
+		t.Fatalf("mixed unsafe state got %#v events=%#v", state, events)
+	}
+	if _, err := engine.PlaceExplosive(state, PlaceExplosiveCommand{PlayerID: "p2", Index: 0}); err != nil {
+		t.Fatalf("PlaceExplosive returned error: %v", err)
+	}
+	if state.Phase != PhasePlayerTurn || state.CurrentPlayerID != "p2" {
+		t.Fatalf("mixed unsafe resolution should advance from p1 to p2, got %#v", state)
+	}
+}
+
 func TestDrawExplosiveWithShieldMovesToPlacementPhase(t *testing.T) {
 	engine := NewEngine(rand.New(rand.NewSource(18)))
 	state := engineTestState(
