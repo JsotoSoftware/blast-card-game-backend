@@ -45,8 +45,7 @@ func (e *Engine) DrawCard(state *GameState, cmd DrawCardCommand) ([]Event, error
 	if state.CurrentPlayerID != cmd.PlayerID {
 		return nil, ErrNotYourTurn
 	}
-	playerIndex, player, err := currentAlivePlayer(state, cmd.PlayerID)
-	if err != nil {
+	if _, _, err := currentAlivePlayer(state, cmd.PlayerID); err != nil {
 		return nil, err
 	}
 	if len(state.DrawPile) == 0 {
@@ -55,9 +54,16 @@ func (e *Engine) DrawCard(state *GameState, cmd DrawCardCommand) ([]Event, error
 
 	drawn := state.DrawPile[0]
 	state.DrawPile = state.DrawPile[1:]
+	return e.resolveDrawnCard(state, cmd.PlayerID, drawn)
+}
 
-	events := []Event{e.nextEvent(state, EventCardDrawn, cmd.PlayerID, []string{drawn.ID}, "")}
+func (e *Engine) resolveDrawnCard(state *GameState, playerID string, drawn Card) ([]Event, error) {
+	playerIndex, player, err := currentAlivePlayer(state, playerID)
+	if err != nil {
+		return nil, err
+	}
 
+	events := []Event{e.nextEvent(state, EventCardDrawn, playerID, []string{drawn.ID}, "")}
 	if IsExplosive(drawn.Code) {
 		canHoldDrawnExplosive := findCardIndexByCode(player.Hand, CardExplosiveHolder) >= 0 && countCardsByCode(player.Hand, CardExplosive) == 0
 		if canHoldDrawnExplosive {
@@ -71,8 +77,9 @@ func (e *Engine) DrawCard(state *GameState, cmd DrawCardCommand) ([]Event, error
 			state.DiscardPile = append(state.DiscardPile, drawn)
 			state.DiscardPile = append(state.DiscardPile, player.Hand...)
 			state.Players[playerIndex].Hand = nil
+			e.clearMarksForPlayerHand(state, playerID)
 			state.Players[playerIndex].Alive = false
-			events = append(events, e.nextEvent(state, EventPlayerEliminated, cmd.PlayerID, nil, ""))
+			events = append(events, e.nextEvent(state, EventPlayerEliminated, playerID, nil, ""))
 
 			if e.setWinnerIfGameOver(state) {
 				events = append(events, e.nextEvent(state, EventGameOver, state.WinnerPlayerID, nil, ""))
@@ -85,16 +92,17 @@ func (e *Engine) DrawCard(state *GameState, cmd DrawCardCommand) ([]Event, error
 
 		shield := player.Hand[shieldIndex]
 		state.Players[playerIndex].Hand = removeCardAt(player.Hand, shieldIndex)
+		e.clearMarksForPlayerHand(state, playerID)
 		state.DiscardPile = append(state.DiscardPile, shield)
 		state.Phase = PhaseWaitingExplosivePlacement
 		state.PendingAction = &PendingAction{
 			ID:             e.nextPendingID(),
-			SourcePlayerID: cmd.PlayerID,
+			SourcePlayerID: playerID,
 			Type:           PendingExplosivePlacement,
 			CardIDs:        []string{drawn.ID},
 			Cards:          []Card{drawn},
 		}
-		events = append(events, e.nextEvent(state, EventActionPending, cmd.PlayerID, []string{drawn.ID}, ""))
+		events = append(events, e.nextEvent(state, EventActionPending, playerID, []string{drawn.ID}, ""))
 		return events, nil
 	}
 
@@ -167,13 +175,17 @@ func (e *Engine) PlayCard(state *GameState, cmd PlayCardCommand) ([]Event, error
 			return nil, err
 		}
 	}
-	if card.Code == CardRequestCard {
+	if card.Code == CardRequestCard || card.Code == CardRevealHeldCard {
 		if err := validateTarget(state, cmd.PlayerID, cmd.TargetID, true); err != nil {
 			return nil, err
 		}
 	}
+	if card.Code == CardDrawFromBottom && len(state.DrawPile) == 0 {
+		return nil, ErrDrawPileEmpty
+	}
 
 	state.Players[playerIndex].Hand = removeCardAt(player.Hand, cardIndex)
+	e.clearMarksForPlayerHand(state, cmd.PlayerID)
 	state.DiscardPile = append(state.DiscardPile, card)
 	state.Phase = PhaseCancelWindow
 	state.PendingAction = &PendingAction{
@@ -229,6 +241,7 @@ func (e *Engine) PlayCombo(state *GameState, cmd PlayComboCommand) ([]Event, err
 	}
 
 	state.Players[playerIndex].Hand = removeCardsByIDs(player.Hand, cmd.CardIDs)
+	e.clearMarksForPlayerHand(state, cmd.PlayerID)
 	state.DiscardPile = append(state.DiscardPile, cards...)
 	state.Phase = PhaseCancelWindow
 	state.PendingAction = &PendingAction{
@@ -284,6 +297,7 @@ func (e *Engine) PlayCancel(state *GameState, cmd PlayCancelCommand) ([]Event, e
 
 	card := player.Hand[cardIndex]
 	state.Players[playerIndex].Hand = removeCardAt(player.Hand, cardIndex)
+	e.clearMarksForPlayerHand(state, cmd.PlayerID)
 	state.DiscardPile = append(state.DiscardPile, card)
 	state.PendingAction.CancelCount++
 
@@ -365,6 +379,7 @@ func (e *Engine) ChooseCardForRequest(state *GameState, cmd ChooseCardForRequest
 
 	card := target.Hand[cardIndex]
 	state.Players[targetIndex].Hand = removeCardAt(target.Hand, cardIndex)
+	e.clearMarksForPlayerHand(state, cmd.PlayerID)
 	state.Players[sourceIndex].Hand = append(state.Players[sourceIndex].Hand, card)
 	pending := state.PendingAction
 	state.PendingAction = nil
@@ -373,6 +388,37 @@ func (e *Engine) ChooseCardForRequest(state *GameState, cmd ChooseCardForRequest
 	events := []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, nil, pending.TargetPlayerID)}
 	events = append(events, e.resolveUnsafeExplosives(state, cmd.PlayerID, pending.SourcePlayerID)...)
 	return events, nil
+}
+
+func (e *Engine) ChooseMarkedCard(state *GameState, cmd ChooseMarkedCardCommand) ([]Event, error) {
+	if state.Phase != PhaseWaitingMarkedCardChoice {
+		return nil, ErrInvalidPhase
+	}
+	if state.PendingAction == nil || state.PendingAction.Type != PendingMarkedCardChoice {
+		return nil, ErrNoPendingAction
+	}
+	if state.PendingAction.SourcePlayerID != cmd.PlayerID {
+		return nil, ErrNotYourTurn
+	}
+
+	_, target, err := currentAlivePlayer(state, state.PendingAction.TargetPlayerID)
+	if err != nil {
+		return nil, err
+	}
+	cardIndex := findCardIndexByID(target.Hand, cmd.CardID)
+	if cardIndex < 0 {
+		return nil, ErrCardNotInHand
+	}
+
+	card := target.Hand[cardIndex]
+	if state.MarkedCards == nil {
+		state.MarkedCards = make(map[string]MarkedCard)
+	}
+	state.MarkedCards[card.ID] = MarkedCard{CardID: card.ID, OwnerID: target.ID, Revealed: card}
+	pending := state.PendingAction
+	state.PendingAction = nil
+	state.Phase = PhasePlayerTurn
+	return []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, []string{card.ID}, pending.TargetPlayerID)}, nil
 }
 
 func (e *Engine) ChooseCardForRecycle(state *GameState, cmd ChooseCardForRecycleCommand) ([]Event, error) {
@@ -401,6 +447,7 @@ func (e *Engine) ChooseCardForRecycle(state *GameState, cmd ChooseCardForRecycle
 
 	pending.RecycleSelections[cmd.PlayerID] = player.Hand[cardIndex]
 	state.Players[playerIndex].Hand = removeCardAt(player.Hand, cardIndex)
+	e.clearMarksForPlayerHand(state, cmd.PlayerID)
 	if len(pending.RecycleSelections) != len(pending.RecyclePlayerIDs) {
 		return nil, nil
 	}
@@ -491,6 +538,28 @@ func (e *Engine) resolvePlayedCard(state *GameState, card Card, sourcePlayerID s
 			TargetPlayerID: targetPlayerID,
 		}
 		events = append(events, e.nextEvent(state, EventPrivatePromptSent, targetPlayerID, []string{card.ID}, targetPlayerID))
+	case CardRevealHeldCard:
+		state.Phase = PhaseWaitingMarkedCardChoice
+		state.PendingAction = &PendingAction{
+			ID:             e.nextPendingID(),
+			SourcePlayerID: sourcePlayerID,
+			Type:           PendingMarkedCardChoice,
+			CardIDs:        []string{card.ID},
+			TargetPlayerID: targetPlayerID,
+		}
+		targetIndex := findPlayerIndexByID(state, targetPlayerID)
+		events = append(events, e.nextEvent(state, EventPrivatePromptSent, sourcePlayerID, cardIDsOf(state.Players[targetIndex].Hand), targetPlayerID))
+	case CardDrawFromBottom:
+		if len(state.DrawPile) == 0 {
+			return nil, ErrDrawPileEmpty
+		}
+		drawn := state.DrawPile[len(state.DrawPile)-1]
+		state.DrawPile = state.DrawPile[:len(state.DrawPile)-1]
+		drawEvents, err := e.resolveDrawnCard(state, sourcePlayerID, drawn)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, drawEvents...)
 	case CardCollectiveRecycle:
 		recyclePlayerIDs := recycleEligiblePlayerIDs(state)
 		if len(recyclePlayerIDs) == 0 {
@@ -529,7 +598,7 @@ func (e *Engine) resolveCombo(state *GameState, pending *PendingAction) ([]Event
 		if pending.RequestedCode == "" {
 			return nil, ErrInvalidCardPlay
 		}
-		transferred, err := transferFirstCardByCode(state, pending.TargetPlayerID, pending.SourcePlayerID, pending.RequestedCode)
+		transferred, err := e.transferFirstCardByCode(state, pending.TargetPlayerID, pending.SourcePlayerID, pending.RequestedCode)
 		if err != nil {
 			return nil, err
 		}
@@ -570,11 +639,12 @@ func (e *Engine) transferRandomCard(state *GameState, fromPlayerID string, toPla
 	cardIndex := e.deckFactory.rng.Intn(len(fromPlayer.Hand))
 	card := fromPlayer.Hand[cardIndex]
 	state.Players[fromIndex].Hand = removeCardAt(fromPlayer.Hand, cardIndex)
+	e.clearMarksForPlayerHand(state, fromPlayerID)
 	state.Players[toIndex].Hand = append(state.Players[toIndex].Hand, card)
 	return nil
 }
 
-func transferFirstCardByCode(state *GameState, fromPlayerID string, toPlayerID string, code CardCode) (bool, error) {
+func (e *Engine) transferFirstCardByCode(state *GameState, fromPlayerID string, toPlayerID string, code CardCode) (bool, error) {
 	fromIndex, fromPlayer, err := currentAlivePlayer(state, fromPlayerID)
 	if err != nil {
 		return false, err
@@ -591,6 +661,7 @@ func transferFirstCardByCode(state *GameState, fromPlayerID string, toPlayerID s
 
 	card := fromPlayer.Hand[cardIndex]
 	state.Players[fromIndex].Hand = removeCardAt(fromPlayer.Hand, cardIndex)
+	e.clearMarksForPlayerHand(state, fromPlayerID)
 	state.Players[toIndex].Hand = append(state.Players[toIndex].Hand, card)
 	return true, nil
 }
@@ -625,6 +696,7 @@ func (e *Engine) resolveUnsafeExplosivesFrom(state *GameState, originalCurrentPl
 		if shieldIndex < 0 {
 			state.DiscardPile = append(state.DiscardPile, player.Hand...)
 			state.Players[playerIndex].Hand = nil
+			e.clearMarksForPlayerHand(state, playerID)
 			state.Players[playerIndex].Alive = false
 			events = append(events, e.nextEvent(state, EventPlayerEliminated, playerID, nil, ""))
 			continue
@@ -638,6 +710,7 @@ func (e *Engine) resolveUnsafeExplosivesFrom(state *GameState, originalCurrentPl
 			explosiveIndex--
 		}
 		state.Players[playerIndex].Hand = removeCardAt(hand, explosiveIndex)
+		e.clearMarksForPlayerHand(state, playerID)
 		state.DiscardPile = append(state.DiscardPile, shield)
 		state.UnsafeExplosiveQueue = append(state.UnsafeExplosiveQueue, UnsafeExplosivePlacement{PlayerID: playerID, Card: explosive})
 	}
@@ -647,6 +720,18 @@ func (e *Engine) resolveUnsafeExplosivesFrom(state *GameState, originalCurrentPl
 		return events
 	}
 	return append(events, e.finishUnsafeExplosiveResolution(state, originalCurrentPlayerID)...)
+}
+
+func (e *Engine) clearMarksForPlayerHand(state *GameState, playerID string) {
+	playerIndex := findPlayerIndexByID(state, playerID)
+	if playerIndex < 0 {
+		return
+	}
+	for cardID, marked := range state.MarkedCards {
+		if marked.OwnerID == playerID && findCardIndexByID(state.Players[playerIndex].Hand, cardID) < 0 {
+			delete(state.MarkedCards, cardID)
+		}
+	}
 }
 
 func (e *Engine) startNextUnsafeExplosivePlacement(state *GameState, originalCurrentPlayerID string) []Event {
@@ -754,6 +839,8 @@ func isSupportedBasicAction(code CardCode) bool {
 		CardPeekDeck,
 		CardPeekDeck5,
 		CardRequestCard,
+		CardRevealHeldCard,
+		CardDrawFromBottom,
 		CardCollectiveRecycle:
 		return true
 	default:

@@ -707,6 +707,60 @@ func TestWebSocketRecycleChoiceRequiresEligiblePlayerAndKeepsCardPrivate(t *test
 	}
 }
 
+func TestWebSocketChooseMarkedCard(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, joinerSession := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+
+	if _, err := manager.StartGameWithoutAuth(hostSession.RoomID); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	roomValue, exists := manager.GetRoom(hostSession.RoomID)
+	if !exists {
+		t.Fatal("room should exist")
+	}
+	state := roomValue.State()
+	for i, player := range state.Players {
+		if player.ID == joinerSession.PlayerID {
+			state.Players[i].Hand = []game.Card{{ID: "marked-card-1", Code: game.CardSkipTurn}}
+		}
+	}
+	state.Phase = game.PhaseWaitingMarkedCardChoice
+	state.PendingAction = &game.PendingAction{ID: "mark-pending-1", SourcePlayerID: hostSession.PlayerID, TargetPlayerID: joinerSession.PlayerID, Type: game.PendingMarkedCardChoice}
+
+	payload, err := json.Marshal(ChooseMarkedCardPayload{CardID: "marked-card-1"})
+	if err != nil {
+		t.Fatalf("Marshal marked-card payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, joinerConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_MARKED_CARD", RequestID: "mark-as-target", RoomID: hostSession.RoomID, PlayerToken: joinerSession.PlayerToken, Payload: payload})
+	unauthorizedResponse := readUntilServerEnvelope(t, joinerConn, MessageCommandError)
+	var unauthorizedError CommandErrorPayload
+	if err := json.Unmarshal(unauthorizedResponse.Payload, &unauthorizedError); err != nil {
+		t.Fatalf("Unmarshal marked-card authorization error returned error: %v", err)
+	}
+	if unauthorizedError.Code != "NOT_YOUR_TURN" {
+		t.Fatalf("marked-card authorization error got %s, want NOT_YOUR_TURN", unauthorizedError.Code)
+	}
+
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "CHOOSE_MARKED_CARD", RequestID: "mark-card", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: payload})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	hostViewEnvelope := readUntilServerEnvelope(t, hostConn, MessageGameView)
+	var hostView game.PlayerGameView
+	if err := json.Unmarshal(hostViewEnvelope.Payload, &hostView); err != nil {
+		t.Fatalf("Unmarshal marked-card game view returned error: %v", err)
+	}
+	if len(hostView.PublicMarkedCards) != 1 || hostView.PublicMarkedCards[0].CardID != "marked-card-1" || hostView.PublicMarkedCards[0].OwnerID != joinerSession.PlayerID || hostView.PublicMarkedCards[0].Code != game.CardSkipTurn {
+		t.Fatalf("unexpected marked cards in view: %#v", hostView.PublicMarkedCards)
+	}
+}
+
 func TestWebSocketTransferHost(t *testing.T) {
 	manager := room.NewManager()
 	server := httptest.NewServer(NewWebSocketHandler(manager, nil))

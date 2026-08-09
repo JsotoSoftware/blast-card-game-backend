@@ -1369,6 +1369,217 @@ func TestTwoCancelsAllowComboToResolve(t *testing.T) {
 	}
 }
 
+func TestRevealHeldCardCancellationAndTargetValidation(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(44)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("reveal-1", CardRevealHeldCard), engineTestCard("cancel-1", CardCancel)}),
+			engineTestPlayer("p2", []Card{engineTestCard("target-card", CardSkipTurn), engineTestCard("cancel-2", CardCancel)}),
+		},
+		nil,
+		"p1",
+	)
+
+	for _, targetID := range []string{"p1", "missing"} {
+		if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"reveal-1"}, TargetID: targetID}); err == nil {
+			t.Fatalf("PlayCard should reject target %q", targetID)
+		}
+	}
+	state.Players[1].Alive = false
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"reveal-1"}, TargetID: "p2"}); err == nil {
+		t.Fatal("PlayCard should reject a dead target")
+	}
+	state.Players[1].Alive = true
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"reveal-1"}, TargetID: "p2"}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.PlayCancel(state, PlayCancelCommand{PlayerID: "p2", CardID: "cancel-2"}); err != nil {
+		t.Fatalf("PlayCancel returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(state); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if state.PendingAction != nil || state.Phase != PhasePlayerTurn || len(state.MarkedCards) != 0 {
+		t.Fatalf("canceled reveal should not prompt or mark: %#v", state)
+	}
+}
+
+func TestRevealHeldCardMarksAndClearsWhenCardLeavesHand(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(45)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("reveal-1", CardRevealHeldCard)}),
+			engineTestPlayer("p2", []Card{engineTestCard("marked-card", CardSkipTurn)}),
+		},
+		nil,
+		"p1",
+	)
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"reveal-1"}, TargetID: "p2"}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if state.Phase != PhaseWaitingMarkedCardChoice || state.PendingAction == nil || state.PendingAction.TargetPlayerID != "p2" {
+		t.Fatalf("reveal should prompt its target after cancellation resolves: %#v", state)
+	}
+	if len(events) != 2 || events[1].Type != EventPrivatePromptSent || events[1].PlayerID != "p1" || events[1].TargetID != "p2" || !reflect.DeepEqual(events[1].CardIDs, []string{"marked-card"}) || len(events[1].Cards) != 0 {
+		t.Fatalf("source should receive only the target hand's opaque card IDs: %#v", events)
+	}
+	if filtered := FilterEventsForPlayer(events, "p2"); len(filtered) != 1 {
+		t.Fatalf("target should not receive source's private choice prompt: %#v", filtered)
+	}
+	if _, err := engine.ChooseMarkedCard(state, ChooseMarkedCardCommand{PlayerID: "p2", CardID: "marked-card"}); !errors.Is(err, ErrNotYourTurn) {
+		t.Fatalf("wrong player error got %v, want ErrNotYourTurn", err)
+	}
+	if _, err := engine.ChooseMarkedCard(state, ChooseMarkedCardCommand{PlayerID: "p1", CardID: "missing"}); !errors.Is(err, ErrCardNotInHand) {
+		t.Fatalf("missing card error got %v, want ErrCardNotInHand", err)
+	}
+	markEvents, err := engine.ChooseMarkedCard(state, ChooseMarkedCardCommand{PlayerID: "p1", CardID: "marked-card"})
+	if err != nil {
+		t.Fatalf("ChooseMarkedCard returned error: %v", err)
+	}
+	if len(markEvents) != 1 || markEvents[0].TargetID != "p2" {
+		t.Fatalf("marked-card resolution should retain the target owner: %#v", markEvents)
+	}
+	if marked := state.MarkedCards["marked-card"]; marked.OwnerID != "p2" || marked.Revealed.Code != CardSkipTurn {
+		t.Fatalf("unexpected mark: %#v", marked)
+	}
+
+	state.CurrentPlayerID = "p2"
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p2", CardIDs: []string{"marked-card"}}); err != nil {
+		t.Fatalf("PlayCard marked card returned error: %v", err)
+	}
+	if _, marked := state.MarkedCards["marked-card"]; marked {
+		t.Fatalf("mark should clear after the card leaves its owner hand: %#v", state.MarkedCards)
+	}
+}
+
+func TestMarkedCardClearsAfterRequestTransfer(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(46)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", nil),
+			engineTestPlayer("p2", []Card{engineTestCard("marked-card", CardSkipTurn)}),
+		},
+		nil,
+		"p1",
+	)
+	state.Phase = PhaseWaitingRequestCardChoice
+	state.PendingAction = &PendingAction{ID: "request-1", SourcePlayerID: "p1", TargetPlayerID: "p2", Type: PendingRequestCardChoice}
+	state.MarkedCards["marked-card"] = MarkedCard{CardID: "marked-card", OwnerID: "p2", Revealed: engineTestCard("marked-card", CardSkipTurn)}
+
+	if _, err := engine.ChooseCardForRequest(state, ChooseCardForRequestCommand{PlayerID: "p2", CardID: "marked-card"}); err != nil {
+		t.Fatalf("ChooseCardForRequest returned error: %v", err)
+	}
+	if _, marked := state.MarkedCards["marked-card"]; marked {
+		t.Fatalf("mark should clear after transfer: %#v", state.MarkedCards)
+	}
+}
+
+func TestDrawFromBottomDrawsBottomCardAndKeepsIdentityPrivate(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(47)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("bottom-draw", CardDrawFromBottom)}),
+			engineTestPlayer("p2", nil),
+		},
+		[]Card{engineTestCard("top-card", CardSkipTurn), engineTestCard("bottom-card", CardShuffleDeck)},
+		"p1",
+	)
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"bottom-draw"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if findCardIndexByID(state.Players[0].Hand, "bottom-card") < 0 || len(state.DrawPile) != 1 || state.DrawPile[0].ID != "top-card" {
+		t.Fatalf("bottom draw should draw only the bottom card: %#v", state)
+	}
+	if state.CurrentPlayerID != "p2" {
+		t.Fatalf("bottom draw should end p1's turn, current player=%s", state.CurrentPlayerID)
+	}
+	if filtered := FilterEventsForPlayer(events, "p2"); len(filtered) < 2 || filtered[1].Type != EventCardDrawn || len(filtered[1].CardIDs) != 0 || len(filtered[1].Cards) != 0 {
+		t.Fatalf("bottom draw leaked card identity to another player: %#v", filtered)
+	}
+}
+
+func TestDrawFromBottomCancellationAndEmptyPileAreAtomic(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(48)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("bottom-draw", CardDrawFromBottom)}),
+			engineTestPlayer("p2", []Card{engineTestCard("cancel-1", CardCancel)}),
+		},
+		[]Card{engineTestCard("bottom-card", CardSkipTurn)},
+		"p1",
+	)
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"bottom-draw"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.PlayCancel(state, PlayCancelCommand{PlayerID: "p2", CardID: "cancel-1"}); err != nil {
+		t.Fatalf("PlayCancel returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(state); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if len(state.DrawPile) != 1 || state.DrawPile[0].ID != "bottom-card" || findCardIndexByID(state.Players[0].Hand, "bottom-card") >= 0 {
+		t.Fatalf("canceled bottom draw should not draw: %#v", state)
+	}
+
+	emptyState := engineTestState([]Player{engineTestPlayer("p1", []Card{engineTestCard("empty-bottom-draw", CardDrawFromBottom)}), engineTestPlayer("p2", nil)}, nil, "p1")
+	if _, err := engine.PlayCard(emptyState, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"empty-bottom-draw"}}); !errors.Is(err, ErrDrawPileEmpty) {
+		t.Fatalf("empty bottom draw error got %v, want ErrDrawPileEmpty", err)
+	}
+	if emptyState.Phase != PhasePlayerTurn || emptyState.PendingAction != nil || len(emptyState.DiscardPile) != 0 || findCardIndexByID(emptyState.Players[0].Hand, "empty-bottom-draw") < 0 {
+		t.Fatalf("empty bottom draw should leave state unchanged: %#v", emptyState)
+	}
+}
+
+func TestDrawFromBottomExplosiveMatchesNormalDrawResolution(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(49)))
+	shieldState := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("bottom-draw", CardDrawFromBottom), engineTestCard("shield-1", CardShield)}),
+			engineTestPlayer("p2", nil),
+		},
+		[]Card{engineTestCard("top-card", CardSkipTurn), engineTestCard("bottom-explosive", CardExplosive)},
+		"p1",
+	)
+	if _, err := engine.PlayCard(shieldState, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"bottom-draw"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(shieldState); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if shieldState.Phase != PhaseWaitingExplosivePlacement || shieldState.PendingAction == nil || shieldState.PendingAction.Cards[0].ID != "bottom-explosive" || findCardIndexByID(shieldState.Players[0].Hand, "shield-1") >= 0 {
+		t.Fatalf("shielded bottom explosive should require placement: %#v", shieldState)
+	}
+
+	holderState := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("bottom-draw", CardDrawFromBottom), engineTestCard("holder-1", CardExplosiveHolder)}),
+			engineTestPlayer("p2", nil),
+		},
+		[]Card{engineTestCard("bottom-explosive", CardExplosive)},
+		"p1",
+	)
+	if _, err := engine.PlayCard(holderState, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"bottom-draw"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(holderState); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if findCardIndexByID(holderState.Players[0].Hand, "bottom-explosive") < 0 || holderState.Phase != PhasePlayerTurn || holderState.CurrentPlayerID != "p2" {
+		t.Fatalf("holder should retain a bottom-drawn explosive and end turn: %#v", holderState)
+	}
+}
+
 func engineTestState(players []Player, drawPile []Card, currentPlayerID string) *GameState {
 	turnDebt := make(map[string]int, len(players))
 	for i := range players {

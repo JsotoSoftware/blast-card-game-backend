@@ -84,20 +84,20 @@ func TestBuildViewIncludesPublicMarkedCardsOnly(t *testing.T) {
 	state := engineTestState(
 		[]Player{
 			engineTestPlayer("p1", nil),
-			engineTestPlayer("p2", []Card{engineTestCard("marked-1", CardShuffleDeck), engineTestCard("hidden-1", CardSkipTurn)}),
+			engineTestPlayer("p2", []Card{engineTestCard("marked-0", CardPeekDeck), engineTestCard("marked-1", CardShuffleDeck), engineTestCard("hidden-1", CardSkipTurn)}),
 		},
 		nil,
 		"p1",
 	)
 	state.MarkedCards["marked-1"] = MarkedCard{CardID: "marked-1", OwnerID: "p2", Revealed: engineTestCard("marked-1", CardShuffleDeck)}
-	state.Players[1].MarkedCardIDs = []string{"marked-1"}
+	state.MarkedCards["marked-0"] = MarkedCard{CardID: "marked-0", OwnerID: "p2", Revealed: engineTestCard("marked-0", CardPeekDeck)}
 
 	view, err := BuildViewForPlayer(state, "p1")
 	if err != nil {
 		t.Fatalf("BuildViewForPlayer returned error: %v", err)
 	}
 
-	if len(view.PublicMarkedCards) != 1 || view.PublicMarkedCards[0].CardID != "marked-1" || view.PublicMarkedCards[0].Code != CardShuffleDeck {
+	if len(view.PublicMarkedCards) != 2 || view.PublicMarkedCards[0].CardID != "marked-0" || view.PublicMarkedCards[0].Code != CardPeekDeck || view.PublicMarkedCards[1].CardID != "marked-1" || view.PublicMarkedCards[1].Code != CardShuffleDeck {
 		t.Fatalf("unexpected marked card views: %#v", view.PublicMarkedCards)
 	}
 	if reflect.DeepEqual(view.PublicMarkedCards, []PublicMarkedCardView{{CardID: "hidden-1", OwnerID: "p2", Code: CardSkipTurn}}) {

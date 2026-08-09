@@ -143,6 +143,8 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, client *connectedC
 		return h.handleChooseCardFromDiscard(ctx, client, envelope)
 	case "CHOOSE_CARD_FOR_RECYCLE":
 		return h.handleChooseCardForRecycle(ctx, client, envelope)
+	case "CHOOSE_MARKED_CARD":
+		return h.handleChooseMarkedCard(ctx, client, envelope)
 	default:
 		return h.writeError(ctx, client, envelope.RequestID, "UNKNOWN_COMMAND", "Unknown command type.")
 	}
@@ -408,6 +410,23 @@ func (h *WebSocketHandler) handleChooseCardForRequest(ctx context.Context, clien
 	}
 
 	events, err := h.manager.ChooseCardForRequest(roomID, token, payload.CardID)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
+}
+
+func (h *WebSocketHandler) handleChooseMarkedCard(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
+	roomID, token, err := h.sessionForCommand(client, envelope)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	var payload ChooseMarkedCardPayload
+	if err := decodePayload(envelope.Payload, &payload); err != nil || payload.CardID == "" {
+		return h.writeError(ctx, client, envelope.RequestID, "INVALID_PAYLOAD", "Invalid CHOOSE_MARKED_CARD payload.")
+	}
+
+	events, err := h.manager.ChooseMarkedCard(roomID, token, payload.CardID)
 	if err != nil {
 		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
 	}

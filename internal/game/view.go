@@ -1,5 +1,7 @@
 package game
 
+import "sort"
+
 type PlayerGameView struct {
 	RoomID            string                   `json:"roomId"`
 	Phase             GamePhase                `json:"phase"`
@@ -22,15 +24,14 @@ type PlayerPrivateView struct {
 }
 
 type PlayerPublicView struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	HandCount     int      `json:"handCount"`
-	Alive         bool     `json:"alive"`
-	Connected     bool     `json:"connected"`
-	Ready         bool     `json:"ready"`
-	IsHost        bool     `json:"isHost"`
-	Blinded       bool     `json:"blinded"`
-	MarkedCardIDs []string `json:"markedCardIds"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	HandCount int    `json:"handCount"`
+	Alive     bool   `json:"alive"`
+	Connected bool   `json:"connected"`
+	Ready     bool   `json:"ready"`
+	IsHost    bool   `json:"isHost"`
+	Blinded   bool   `json:"blinded"`
 }
 
 type PrivateCardView struct {
@@ -124,15 +125,14 @@ func buildPublicPlayerViews(players []Player) []PlayerPublicView {
 	views := make([]PlayerPublicView, len(players))
 	for i, player := range players {
 		views[i] = PlayerPublicView{
-			ID:            player.ID,
-			Name:          player.Name,
-			HandCount:     len(player.Hand),
-			Alive:         player.Alive,
-			Connected:     player.Connected,
-			Ready:         player.Ready,
-			IsHost:        player.IsHost,
-			Blinded:       player.Blinded,
-			MarkedCardIDs: append([]string(nil), player.MarkedCardIDs...),
+			ID:        player.ID,
+			Name:      player.Name,
+			HandCount: len(player.Hand),
+			Alive:     player.Alive,
+			Connected: player.Connected,
+			Ready:     player.Ready,
+			IsHost:    player.IsHost,
+			Blinded:   player.Blinded,
 		}
 	}
 	return views
@@ -171,6 +171,7 @@ func buildPublicMarkedCardViews(markedCards map[string]MarkedCard) []PublicMarke
 			Code:    marked.Revealed.Code,
 		})
 	}
+	sort.Slice(views, func(i, j int) bool { return views[i].CardID < views[j].CardID })
 	return views
 }
 
@@ -210,6 +211,10 @@ func buildAvailableActions(state *GameState, player Player) []CommandType {
 	case PhaseWaitingRecycleChoices:
 		if state.PendingAction != nil && containsPlayerID(state.PendingAction.RecyclePlayerIDs, player.ID) && state.PendingAction.RecycleSelections[player.ID].ID == "" {
 			actions = append(actions, CommandChooseCardForRecycle)
+		}
+	case PhaseWaitingMarkedCardChoice:
+		if state.PendingAction != nil && state.PendingAction.SourcePlayerID == player.ID {
+			actions = append(actions, CommandChooseMarkedCard)
 		}
 	}
 	return actions

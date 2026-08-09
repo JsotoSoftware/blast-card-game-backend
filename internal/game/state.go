@@ -1,15 +1,14 @@
 package game
 
 type Player struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Hand          []Card   `json:"hand"`
-	Alive         bool     `json:"alive"`
-	Connected     bool     `json:"connected"`
-	Ready         bool     `json:"ready"`
-	IsHost        bool     `json:"isHost"`
-	Blinded       bool     `json:"blinded"`
-	MarkedCardIDs []string `json:"markedCardIds"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Hand      []Card `json:"hand"`
+	Alive     bool   `json:"alive"`
+	Connected bool   `json:"connected"`
+	Ready     bool   `json:"ready"`
+	IsHost    bool   `json:"isHost"`
+	Blinded   bool   `json:"blinded"`
 }
 
 type GameState struct {

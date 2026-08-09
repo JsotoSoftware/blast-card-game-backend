@@ -222,7 +222,6 @@ func (f *DeckFactory) NewSetup(roomID string, players []Player) (*GameState, err
 		dealIndex += InitialRandomHandCards
 		player.Alive = true
 		player.Blinded = false
-		player.MarkedCardIDs = nil
 		setupPlayers[i] = player
 	}
 
