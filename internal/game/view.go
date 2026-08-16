@@ -216,6 +216,10 @@ func buildAvailableActions(state *GameState, player Player) []CommandType {
 		if state.PendingAction != nil && state.PendingAction.SourcePlayerID == player.ID {
 			actions = append(actions, CommandChooseMarkedCard)
 		}
+	case PhaseWaitingDeckReorder:
+		if state.PendingAction != nil && state.PendingAction.SourcePlayerID == player.ID {
+			actions = append(actions, CommandSubmitReorderedTopCards)
+		}
 	}
 	return actions
 }

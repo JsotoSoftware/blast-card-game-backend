@@ -99,6 +99,10 @@ type ChooseMarkedCardPayload struct {
 	CardID string `json:"cardId"`
 }
 
+type SubmitReorderedTopCardsPayload struct {
+	CardIDs []string `json:"cardIds"`
+}
+
 type CommandAckPayload struct {
 	RequestID string `json:"requestId,omitempty"`
 }

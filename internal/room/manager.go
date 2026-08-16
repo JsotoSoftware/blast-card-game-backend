@@ -229,6 +229,14 @@ func (m *Manager) PlayCombo(roomID string, playerToken string, cardIDs []string,
 	return room.PlayCombo(playerToken, cardIDs, targetPlayerID, requestedCode)
 }
 
+func (m *Manager) SubmitReorderedTopCards(roomID string, playerToken string, cardIDs []string) ([]game.Event, error) {
+	room, exists := m.GetRoom(roomID)
+	if !exists {
+		return nil, ErrRoomNotFound
+	}
+	return room.SubmitReorderedTopCards(playerToken, cardIDs)
+}
+
 func (m *Manager) ChooseMarkedCard(roomID string, playerToken string, cardID string) ([]game.Event, error) {
 	room, exists := m.GetRoom(roomID)
 	if !exists {

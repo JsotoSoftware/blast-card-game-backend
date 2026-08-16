@@ -82,3 +82,8 @@ type ChooseMarkedCardCommand struct {
 	PlayerID string `json:"playerId"`
 	CardID   string `json:"cardId"`
 }
+
+type SubmitReorderedTopCardsCommand struct {
+	PlayerID string   `json:"playerId"`
+	CardIDs  []string `json:"cardIds"`
+}

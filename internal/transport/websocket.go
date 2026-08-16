@@ -145,6 +145,8 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, client *connectedC
 		return h.handleChooseCardForRecycle(ctx, client, envelope)
 	case "CHOOSE_MARKED_CARD":
 		return h.handleChooseMarkedCard(ctx, client, envelope)
+	case "SUBMIT_REORDERED_TOP_CARDS":
+		return h.handleSubmitReorderedTopCards(ctx, client, envelope)
 	default:
 		return h.writeError(ctx, client, envelope.RequestID, "UNKNOWN_COMMAND", "Unknown command type.")
 	}
@@ -410,6 +412,23 @@ func (h *WebSocketHandler) handleChooseCardForRequest(ctx context.Context, clien
 	}
 
 	events, err := h.manager.ChooseCardForRequest(roomID, token, payload.CardID)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	return h.ackEventsAndViews(ctx, client, roomID, envelope.RequestID, events)
+}
+
+func (h *WebSocketHandler) handleSubmitReorderedTopCards(ctx context.Context, client *connectedClient, envelope ClientEnvelope) error {
+	roomID, token, err := h.sessionForCommand(client, envelope)
+	if err != nil {
+		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
+	}
+	var payload SubmitReorderedTopCardsPayload
+	if err := decodePayload(envelope.Payload, &payload); err != nil || payload.CardIDs == nil {
+		return h.writeError(ctx, client, envelope.RequestID, "INVALID_PAYLOAD", "Invalid SUBMIT_REORDERED_TOP_CARDS payload.")
+	}
+
+	events, err := h.manager.SubmitReorderedTopCards(roomID, token, payload.CardIDs)
 	if err != nil {
 		return h.writeError(ctx, client, envelope.RequestID, errorCode(err), err.Error())
 	}

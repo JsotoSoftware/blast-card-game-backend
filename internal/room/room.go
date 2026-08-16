@@ -407,6 +407,20 @@ func (r *Room) PlayCombo(playerToken string, cardIDs []string, targetPlayerID st
 	return r.engine.PlayCombo(r.state, game.PlayComboCommand{PlayerID: player.ID, CardIDs: cardIDs, TargetID: targetPlayerID, RequestedCode: requestedCode})
 }
 
+func (r *Room) SubmitReorderedTopCards(playerToken string, cardIDs []string) ([]game.Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	player := r.playerByTokenLocked(playerToken)
+	if player == nil {
+		return nil, ErrInvalidPlayerToken
+	}
+	if r.state == nil {
+		return nil, ErrGameNotStarted
+	}
+	return r.engine.SubmitReorderedTopCards(r.state, game.SubmitReorderedTopCardsCommand{PlayerID: player.ID, CardIDs: cardIDs})
+}
+
 func (r *Room) ChooseMarkedCard(playerToken string, cardID string) ([]game.Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

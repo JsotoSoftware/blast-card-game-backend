@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -758,6 +759,47 @@ func TestWebSocketChooseMarkedCard(t *testing.T) {
 	}
 	if len(hostView.PublicMarkedCards) != 1 || hostView.PublicMarkedCards[0].CardID != "marked-card-1" || hostView.PublicMarkedCards[0].OwnerID != joinerSession.PlayerID || hostView.PublicMarkedCards[0].Code != game.CardSkipTurn {
 		t.Fatalf("unexpected marked cards in view: %#v", hostView.PublicMarkedCards)
+	}
+}
+
+func TestWebSocketSubmitReorderedTopCards(t *testing.T) {
+	manager := room.NewManager()
+	server := httptest.NewServer(NewWebSocketHandler(manager, nil))
+	defer server.Close()
+
+	hostConn := dialTestWebSocket(t, server.URL)
+	defer hostConn.Close(websocket.StatusNormalClosure, "done")
+	joinerConn := dialTestWebSocket(t, server.URL)
+	defer joinerConn.Close(websocket.StatusNormalClosure, "done")
+	hostSession, _ := createAndJoinRoomOverWebSocket(t, hostConn, joinerConn)
+	if _, err := manager.StartGameWithoutAuth(hostSession.RoomID); err != nil {
+		t.Fatalf("StartGameWithoutAuth returned error: %v", err)
+	}
+	roomValue, exists := manager.GetRoom(hostSession.RoomID)
+	if !exists {
+		t.Fatal("room should exist")
+	}
+	state := roomValue.State()
+	state.Phase = game.PhaseWaitingDeckReorder
+	state.DrawPile = []game.Card{{ID: "top-1", Code: game.CardSkipTurn}, {ID: "top-2", Code: game.CardShield}, {ID: "unchanged", Code: game.CardShuffleDeck}}
+	state.PendingAction = &game.PendingAction{
+		ID:             "reorder-pending-1",
+		SourcePlayerID: hostSession.PlayerID,
+		Type:           game.PendingDeckReorder,
+		CardIDs:        []string{"reorder-action"},
+		Cards:          []game.Card{{ID: "top-1", Code: game.CardSkipTurn}, {ID: "top-2", Code: game.CardShield}},
+	}
+
+	payload, err := json.Marshal(SubmitReorderedTopCardsPayload{CardIDs: []string{"top-2", "top-1"}})
+	if err != nil {
+		t.Fatalf("Marshal reorder payload returned error: %v", err)
+	}
+	writeClientEnvelope(t, hostConn, ClientEnvelope{Version: ProtocolVersion, Type: "SUBMIT_REORDERED_TOP_CARDS", RequestID: "reorder-top", RoomID: hostSession.RoomID, PlayerToken: hostSession.PlayerToken, Payload: payload})
+	readUntilServerEnvelope(t, hostConn, MessageCommandAck)
+	readUntilServerEnvelope(t, hostConn, MessageGameEvents)
+	readUntilServerEnvelope(t, hostConn, MessageGameView)
+	if got := []string{state.DrawPile[0].ID, state.DrawPile[1].ID, state.DrawPile[2].ID}; !reflect.DeepEqual(got, []string{"top-2", "top-1", "unchanged"}) {
+		t.Fatalf("unexpected reordered pile: %v", got)
 	}
 }
 

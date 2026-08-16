@@ -421,6 +421,49 @@ func (e *Engine) ChooseMarkedCard(state *GameState, cmd ChooseMarkedCardCommand)
 	return []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, []string{card.ID}, pending.TargetPlayerID)}, nil
 }
 
+func (e *Engine) SubmitReorderedTopCards(state *GameState, cmd SubmitReorderedTopCardsCommand) ([]Event, error) {
+	if state.Phase != PhaseWaitingDeckReorder {
+		return nil, ErrInvalidPhase
+	}
+	if state.PendingAction == nil || state.PendingAction.Type != PendingDeckReorder {
+		return nil, ErrNoPendingAction
+	}
+	if state.PendingAction.SourcePlayerID != cmd.PlayerID {
+		return nil, ErrNotYourTurn
+	}
+
+	pending := state.PendingAction
+	if len(cmd.CardIDs) != len(pending.Cards) || len(state.DrawPile) < len(pending.Cards) {
+		return nil, ErrInvalidCardPlay
+	}
+	for i, card := range pending.Cards {
+		if state.DrawPile[i].ID != card.ID {
+			return nil, ErrInvalidCardPlay
+		}
+	}
+	reordered := make([]Card, len(cmd.CardIDs))
+	cardsByID := make(map[string]Card, len(pending.Cards))
+	for _, card := range pending.Cards {
+		cardsByID[card.ID] = card
+	}
+	for i, cardID := range cmd.CardIDs {
+		card, exists := cardsByID[cardID]
+		if !exists {
+			return nil, ErrInvalidCardPlay
+		}
+		delete(cardsByID, cardID)
+		reordered[i] = card
+	}
+	if len(cardsByID) != 0 {
+		return nil, ErrInvalidCardPlay
+	}
+
+	copy(state.DrawPile, reordered)
+	state.PendingAction = nil
+	state.Phase = PhasePlayerTurn
+	return []Event{e.nextEvent(state, EventActionResolved, pending.SourcePlayerID, pending.CardIDs, "")}, nil
+}
+
 func (e *Engine) ChooseCardForRecycle(state *GameState, cmd ChooseCardForRecycleCommand) ([]Event, error) {
 	if state.Phase != PhaseWaitingRecycleChoices {
 		return nil, ErrInvalidPhase
@@ -560,6 +603,31 @@ func (e *Engine) resolvePlayedCard(state *GameState, card Card, sourcePlayerID s
 			return nil, err
 		}
 		events = append(events, drawEvents...)
+	case CardSwapTopBottom:
+		if len(state.DrawPile) > 1 {
+			lastIndex := len(state.DrawPile) - 1
+			state.DrawPile[0], state.DrawPile[lastIndex] = state.DrawPile[lastIndex], state.DrawPile[0]
+		}
+	case CardReorderTop3, CardReorderTop5:
+		limit := 3
+		if card.Code == CardReorderTop5 {
+			limit = 5
+		}
+		cards := topCards(state.DrawPile, limit)
+		if len(cards) == 0 {
+			return events, nil
+		}
+		state.Phase = PhaseWaitingDeckReorder
+		state.PendingAction = &PendingAction{
+			ID:             e.nextPendingID(),
+			SourcePlayerID: sourcePlayerID,
+			Type:           PendingDeckReorder,
+			CardIDs:        []string{card.ID},
+			Cards:          cards,
+		}
+		event := e.nextEvent(state, EventPrivatePromptSent, sourcePlayerID, cardIDsOf(cards), "")
+		event.Cards = cards
+		events = append(events, event)
 	case CardCollectiveRecycle:
 		recyclePlayerIDs := recycleEligiblePlayerIDs(state)
 		if len(recyclePlayerIDs) == 0 {
@@ -841,6 +909,9 @@ func isSupportedBasicAction(code CardCode) bool {
 		CardRequestCard,
 		CardRevealHeldCard,
 		CardDrawFromBottom,
+		CardSwapTopBottom,
+		CardReorderTop3,
+		CardReorderTop5,
 		CardCollectiveRecycle:
 		return true
 	default:

@@ -3,6 +3,7 @@ package game
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"reflect"
 	"strings"
@@ -1578,6 +1579,215 @@ func TestDrawFromBottomExplosiveMatchesNormalDrawResolution(t *testing.T) {
 	if findCardIndexByID(holderState.Players[0].Hand, "bottom-explosive") < 0 || holderState.Phase != PhasePlayerTurn || holderState.CurrentPlayerID != "p2" {
 		t.Fatalf("holder should retain a bottom-drawn explosive and end turn: %#v", holderState)
 	}
+}
+
+func TestSwapTopBottomSwapsWithoutRevealingDrawPile(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(50)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("swap-1", CardSwapTopBottom)}),
+			engineTestPlayer("p2", nil),
+		},
+		[]Card{engineTestCard("top-secret", CardExplosive), engineTestCard("middle-secret", CardShield), engineTestCard("bottom-secret", CardShuffleDeck)},
+		"p1",
+	)
+
+	view, err := BuildViewForPlayer(state, "p1")
+	if err != nil {
+		t.Fatalf("BuildViewForPlayer returned error: %v", err)
+	}
+	if !containsCommand(view.AvailableActions, CommandPlayCard) {
+		t.Fatalf("swap action should make PLAY_CARD available: %#v", view.AvailableActions)
+	}
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"swap-1"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if got := cardIDs(state.DrawPile); !reflect.DeepEqual(got, []string{"bottom-secret", "middle-secret", "top-secret"}) {
+		t.Fatalf("unexpected swapped draw pile: %v", got)
+	}
+	if state.CurrentPlayerID != "p1" || state.Phase != PhasePlayerTurn {
+		t.Fatalf("swap should not end the turn: %#v", state)
+	}
+	for _, event := range FilterEventsForPlayer(events, "p2") {
+		if strings.Contains(fmt.Sprintf("%#v", event), "top-secret") || strings.Contains(fmt.Sprintf("%#v", event), "middle-secret") || strings.Contains(fmt.Sprintf("%#v", event), "bottom-secret") {
+			t.Fatalf("swap leaked draw-pile identity: %#v", event)
+		}
+	}
+}
+
+func TestSwapTopBottomCancellationAndShortPilesAreNoOps(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(51)))
+	canceledState := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("swap-1", CardSwapTopBottom)}),
+			engineTestPlayer("p2", []Card{engineTestCard("cancel-1", CardCancel)}),
+		},
+		[]Card{engineTestCard("top-secret", CardSkipTurn), engineTestCard("bottom-secret", CardShuffleDeck)},
+		"p1",
+	)
+	if _, err := engine.PlayCard(canceledState, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"swap-1"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.PlayCancel(canceledState, PlayCancelCommand{PlayerID: "p2", CardID: "cancel-1"}); err != nil {
+		t.Fatalf("PlayCancel returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(canceledState); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if got := cardIDs(canceledState.DrawPile); !reflect.DeepEqual(got, []string{"top-secret", "bottom-secret"}) {
+		t.Fatalf("canceled swap should not mutate draw pile: %v", got)
+	}
+
+	for _, drawPile := range [][]Card{nil, {engineTestCard("only-card", CardSkipTurn)}} {
+		state := engineTestState([]Player{engineTestPlayer("p1", []Card{engineTestCard("swap-1", CardSwapTopBottom)}), engineTestPlayer("p2", nil)}, drawPile, "p1")
+		want := cardIDs(state.DrawPile)
+		if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"swap-1"}}); err != nil {
+			t.Fatalf("PlayCard returned error: %v", err)
+		}
+		if _, err := engine.ResolveCancelWindow(state); err != nil {
+			t.Fatalf("ResolveCancelWindow returned error: %v", err)
+		}
+		if got := cardIDs(state.DrawPile); !reflect.DeepEqual(got, want) {
+			t.Fatalf("short-pile swap should be a no-op: got %v want %v", got, want)
+		}
+	}
+}
+
+func TestReorderTopCardsPrivatePromptAndValidation(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(52)))
+	state := engineTestState(
+		[]Player{
+			engineTestPlayer("p1", []Card{engineTestCard("reorder-3", CardReorderTop3)}),
+			engineTestPlayer("p2", nil),
+		},
+		[]Card{engineTestCard("top-1", CardExplosive), engineTestCard("top-2", CardShield), engineTestCard("top-3", CardShuffleDeck), engineTestCard("unchanged", CardSkipTurn)},
+		"p1",
+	)
+
+	if _, err := engine.PlayCard(state, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"reorder-3"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(state)
+	if err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if state.Phase != PhaseWaitingDeckReorder || state.PendingAction == nil || !reflect.DeepEqual(cardIDs(state.PendingAction.Cards), []string{"top-1", "top-2", "top-3"}) {
+		t.Fatalf("unexpected reorder pending action: %#v", state.PendingAction)
+	}
+	if len(events) != 2 || events[1].Type != EventPrivatePromptSent || events[1].PlayerID != "p1" || !reflect.DeepEqual(events[1].Cards, state.PendingAction.Cards) {
+		t.Fatalf("source should receive private top-card details: %#v", events)
+	}
+	if filtered := FilterEventsForPlayer(events, "p2"); len(filtered) != 1 {
+		t.Fatalf("other players should not receive reorder prompt: %#v", filtered)
+	}
+	view, err := BuildViewForPlayer(state, "p1")
+	if err != nil || !containsCommand(view.AvailableActions, CommandSubmitReorderedTopCards) {
+		t.Fatalf("source should be able to submit reorder: view=%#v err=%v", view, err)
+	}
+	otherView, err := BuildViewForPlayer(state, "p2")
+	if err != nil || containsCommand(otherView.AvailableActions, CommandSubmitReorderedTopCards) {
+		t.Fatalf("other player should not submit reorder: view=%#v err=%v", otherView, err)
+	}
+	if _, err := engine.SubmitReorderedTopCards(state, SubmitReorderedTopCardsCommand{PlayerID: "p2", CardIDs: []string{"top-3", "top-2", "top-1"}}); !errors.Is(err, ErrNotYourTurn) {
+		t.Fatalf("other player error got %v, want ErrNotYourTurn", err)
+	}
+	if _, err := engine.SubmitReorderedTopCards(state, SubmitReorderedTopCardsCommand{PlayerID: "p1", CardIDs: []string{"top-1", "top-1", "top-3"}}); !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("duplicate submission error got %v, want ErrInvalidCardPlay", err)
+	}
+	if _, err := engine.SubmitReorderedTopCards(state, SubmitReorderedTopCardsCommand{PlayerID: "p1", CardIDs: []string{"top-1", "top-2", "unchanged"}}); !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("unseen submission error got %v, want ErrInvalidCardPlay", err)
+	}
+	if _, err := engine.SubmitReorderedTopCards(state, SubmitReorderedTopCardsCommand{PlayerID: "p1", CardIDs: []string{"top-3", "top-1", "top-2"}}); err != nil {
+		t.Fatalf("SubmitReorderedTopCards returned error: %v", err)
+	}
+	if got := cardIDs(state.DrawPile); !reflect.DeepEqual(got, []string{"top-3", "top-1", "top-2", "unchanged"}) || state.Phase != PhasePlayerTurn || state.PendingAction != nil {
+		t.Fatalf("unexpected reordered state: %#v", state)
+	}
+}
+
+func TestReorderTopCardsRejectsStaleDeckPrefix(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(54)))
+	state := engineTestState(
+		[]Player{engineTestPlayer("p1", nil), engineTestPlayer("p2", nil)},
+		[]Card{engineTestCard("changed-top", CardExplosive), engineTestCard("top-2", CardShield), engineTestCard("unchanged", CardSkipTurn)},
+		"p1",
+	)
+	state.Phase = PhaseWaitingDeckReorder
+	state.PendingAction = &PendingAction{
+		ID:             "reorder-pending-1",
+		SourcePlayerID: "p1",
+		Type:           PendingDeckReorder,
+		CardIDs:        []string{"reorder-action"},
+		Cards:          []Card{engineTestCard("top-1", CardExplosive), engineTestCard("top-2", CardShield)},
+	}
+
+	if _, err := engine.SubmitReorderedTopCards(state, SubmitReorderedTopCardsCommand{PlayerID: "p1", CardIDs: []string{"top-2", "top-1"}}); !errors.Is(err, ErrInvalidCardPlay) {
+		t.Fatalf("stale reorder error got %v, want ErrInvalidCardPlay", err)
+	}
+	if got := cardIDs(state.DrawPile); !reflect.DeepEqual(got, []string{"changed-top", "top-2", "unchanged"}) || state.Phase != PhaseWaitingDeckReorder || state.PendingAction == nil {
+		t.Fatalf("stale reorder should not mutate state: %#v", state)
+	}
+}
+
+func TestReorderTopCardsShortPilesCancellationAndEmptyNoOp(t *testing.T) {
+	engine := NewEngine(rand.New(rand.NewSource(53)))
+	shortState := engineTestState(
+		[]Player{engineTestPlayer("p1", []Card{engineTestCard("reorder-5", CardReorderTop5)}), engineTestPlayer("p2", nil)},
+		[]Card{engineTestCard("top-1", CardSkipTurn), engineTestCard("top-2", CardShield)},
+		"p1",
+	)
+	if _, err := engine.PlayCard(shortState, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"reorder-5"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(shortState); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if _, err := engine.SubmitReorderedTopCards(shortState, SubmitReorderedTopCardsCommand{PlayerID: "p1", CardIDs: []string{"top-2", "top-1"}}); err != nil {
+		t.Fatalf("SubmitReorderedTopCards returned error: %v", err)
+	}
+	if got := cardIDs(shortState.DrawPile); !reflect.DeepEqual(got, []string{"top-2", "top-1"}) {
+		t.Fatalf("short pile reorder got %v", got)
+	}
+
+	emptyState := engineTestState([]Player{engineTestPlayer("p1", []Card{engineTestCard("reorder-3", CardReorderTop3)}), engineTestPlayer("p2", nil)}, nil, "p1")
+	if _, err := engine.PlayCard(emptyState, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"reorder-3"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	events, err := engine.ResolveCancelWindow(emptyState)
+	if err != nil || len(events) != 1 || emptyState.PendingAction != nil || emptyState.Phase != PhasePlayerTurn {
+		t.Fatalf("empty reorder should resolve as a no-op: events=%#v state=%#v err=%v", events, emptyState, err)
+	}
+
+	canceledState := engineTestState(
+		[]Player{engineTestPlayer("p1", []Card{engineTestCard("reorder-3", CardReorderTop3)}), engineTestPlayer("p2", []Card{engineTestCard("cancel-1", CardCancel)})},
+		[]Card{engineTestCard("top-1", CardSkipTurn), engineTestCard("top-2", CardShield)},
+		"p1",
+	)
+	if _, err := engine.PlayCard(canceledState, PlayCardCommand{PlayerID: "p1", CardIDs: []string{"reorder-3"}}); err != nil {
+		t.Fatalf("PlayCard returned error: %v", err)
+	}
+	if _, err := engine.PlayCancel(canceledState, PlayCancelCommand{PlayerID: "p2", CardID: "cancel-1"}); err != nil {
+		t.Fatalf("PlayCancel returned error: %v", err)
+	}
+	if _, err := engine.ResolveCancelWindow(canceledState); err != nil {
+		t.Fatalf("ResolveCancelWindow returned error: %v", err)
+	}
+	if got := cardIDs(canceledState.DrawPile); !reflect.DeepEqual(got, []string{"top-1", "top-2"}) || canceledState.PendingAction != nil {
+		t.Fatalf("canceled reorder should not change deck: %#v", canceledState)
+	}
+}
+
+func containsCommand(commands []CommandType, command CommandType) bool {
+	for _, candidate := range commands {
+		if candidate == command {
+			return true
+		}
+	}
+	return false
 }
 
 func engineTestState(players []Player, drawPile []Card, currentPlayerID string) *GameState {
